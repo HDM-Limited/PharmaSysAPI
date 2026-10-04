@@ -125,6 +125,22 @@ const sendInvoiceCancelled = ({ tenantId, to, ...data }) =>
 const sendPaymentRefunded = ({ tenantId, to, ...data }) =>
   renderAndSend(emailTemplates.paymentRefunded, 'payment_refunded', { tenantId, to, data });
 
+/* ─── RENEWAL / UPGRADE ─── */
+
+const sendRenewalRequestReceived = ({ tenantId, to, ...data }) =>
+  renderAndSend(emailTemplates.renewalRequestReceived, 'renewal_request_received', { tenantId, to, data });
+
+const sendUpgradeRequestReceived = ({ tenantId, to, ...data }) =>
+  renderAndSend(emailTemplates.upgradeRequestReceived, 'upgrade_request_received', { tenantId, to, data });
+
+const sendRenewalApproved = ({ tenantId, to, ...data }) =>
+  renderAndSend(emailTemplates.renewalApproved, 'renewal_approved', { tenantId, to, data });
+
+const sendUpgradeApproved = ({ tenantId, to, ...data }) =>
+  renderAndSend(emailTemplates.upgradeApproved, 'upgrade_approved', { tenantId, to, data });
+
+/* ─── SUBSCRIPTION ─── */
+
 const sendSubscriptionPaid = ({ tenantId, to, ...data }) =>
   renderAndSend(emailTemplates.subscriptionPaid, 'subscription_paid', { tenantId, to, data });
 
@@ -153,6 +169,12 @@ const sendAdminNewPending = ({ to, ...data }) =>
 
 const sendAdminPaymentReceived = ({ to, ...data }) =>
   renderAndSend(emailTemplates.adminPaymentReceived, 'admin_payment_received', { tenantId: null, scope: 'admin', to, data });
+
+const sendAdminRenewalRequested = ({ to, ...data }) =>
+  renderAndSend(emailTemplates.adminRenewalRequested, 'admin_renewal_requested', { tenantId: null, scope: 'admin', to, data });
+
+const sendAdminUpgradeRequested = ({ to, ...data }) =>
+  renderAndSend(emailTemplates.adminUpgradeRequested, 'admin_upgrade_requested', { tenantId: null, scope: 'admin', to, data });
 
 const sendAdminServiceDown = ({ to, ...data }) =>
   renderAndSend(emailTemplates.adminServiceDown, 'admin_service_down', { tenantId: null, scope: 'admin', to, data });
@@ -224,6 +246,12 @@ module.exports = {
   sendInvoiceOverdue,
   sendInvoiceCancelled,
   sendPaymentRefunded,
+
+  sendRenewalRequestReceived,
+  sendUpgradeRequestReceived,
+  sendRenewalApproved,
+  sendUpgradeApproved,
+
   sendSubscriptionPaid,
   sendSubscriptionExpiring,
   sendSubscriptionExpired,
@@ -234,6 +262,8 @@ module.exports = {
   sendAdminWelcome,
   sendAdminNewPending,
   sendAdminPaymentReceived,
+  sendAdminRenewalRequested,
+  sendAdminUpgradeRequested,
   sendAdminServiceDown,
   sendAdminBackupFailed,
   sendAdminBackupSuccess,

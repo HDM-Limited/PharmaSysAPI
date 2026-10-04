@@ -16,6 +16,10 @@ class ApiError extends Error {
     return new ApiError(401, code, message);
   }
 
+  static paymentRequired(code = 'PAYMENT_REQUIRED', message = 'Payment required', details = null) {
+    return new ApiError(402, code, message, details);
+  }
+
   static forbidden(code = 'FORBIDDEN', message = 'Forbidden') {
     return new ApiError(403, code, message);
   }

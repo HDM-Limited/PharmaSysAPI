@@ -15,6 +15,38 @@ const AdminAction = require('../../models/admin/AdminAction');
 const emailService = require('../../services/emailService');
 const smsService = require('../../services/smsService');
 
+/* ─────────────── helpers ─────────────── */
+
+function shapeTenant(t) {
+  if (!t || typeof t !== 'object' || !t._id) return null;
+  return {
+    id: t._id,
+    name: t.name || null,
+    slug: t.slug || null,
+    planCode: t.planCode || null,
+  };
+}
+
+function shapeInvoice(i) {
+  if (!i || typeof i !== 'object' || !i._id) return null;
+  return {
+    id: i._id,
+    invoiceNumber: i.invoiceNumber || null,
+    total: i.total ?? null,
+    amountDue: i.amountDue ?? null,
+    currency: i.currency || null,
+    status: i.status || null,
+  };
+}
+
+function shapePayment(p) {
+  return {
+    ...p,
+    tenant: shapeTenant(p.tenantId),
+    invoice: shapeInvoice(p.invoiceId),
+  };
+}
+
 /* ─────────────── LIST ─────────────── */
 
 const list = asyncHandler(async (req, res) => {
@@ -25,35 +57,53 @@ const list = asyncHandler(async (req, res) => {
   if (req.query.method) filter.method = req.query.method;
 
   const [items, total] = await Promise.all([
-    Payment.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+    Payment.find(filter)
+      .populate('tenantId', 'name slug planCode')
+      .populate('invoiceId', 'invoiceNumber total amountDue currency status')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
     Payment.countDocuments(filter),
   ]);
 
-  return paginated(res, items, page, limit, total);
+  const enriched = items.map(shapePayment);
+  return paginated(res, enriched, page, limit, total);
 });
 
 /* ─────────────── GET ─────────────── */
 
 const get = asyncHandler(async (req, res) => {
   assertObjectId(req.params.id, 'paymentId');
-  const payment = await Payment.findById(req.params.id).lean();
+
+  const payment = await Payment.findById(req.params.id)
+    .populate('tenantId', 'name slug planCode country')
+    .populate('invoiceId', 'invoiceNumber total amountPaid amountDue currency status issuedAt dueDate')
+    .lean();
+
   if (!payment) throw ApiError.notFound('PAYMENT_NOT_FOUND', 'Payment not found');
-  return ok(res, payment);
+
+  return ok(res, shapePayment(payment));
 });
 
 /* ─────────────── ATTEMPTS ─────────────── */
 
 const attempts = asyncHandler(async (req, res) => {
   assertObjectId(req.params.id, 'paymentId');
+
   const payment = await Payment.findById(req.params.id).lean();
   if (!payment) throw ApiError.notFound('PAYMENT_NOT_FOUND', 'Payment not found');
 
   const items = await Payment.find({
     tenantId: payment.tenantId,
     invoiceId: payment.invoiceId,
-  }).sort({ createdAt: -1 }).lean();
+  })
+    .populate('tenantId', 'name slug planCode')
+    .populate('invoiceId', 'invoiceNumber status')
+    .sort({ createdAt: -1 })
+    .lean();
 
-  return ok(res, items);
+  return ok(res, items.map(shapePayment));
 });
 
 /* ─────────────── MARK PAID ─────────────── */
@@ -74,7 +124,7 @@ const markPaid = asyncHandler(async (req, res) => {
 
   let invoice = null;
   if (payment.invoiceId) {
-    invoice = await Invoice.findById(payment.invoiceId);
+    invoice = await Invoice.findOne({ __allowGlobal: true, _id: payment.invoiceId });
     if (invoice && invoice.status !== 'paid') {
       invoice.status = 'paid';
       invoice.amountPaid = invoice.total;
@@ -90,7 +140,6 @@ const markPaid = asyncHandler(async (req, res) => {
   const owner = await User.findOne({ __allowGlobal: true, tenantId: payment.tenantId, role: 'owner' }).lean();
   const plan = tenant ? await Plan.findOne({ code: tenant.planCode }).lean() : null;
 
-  // ── Owner notification ──
   if (owner?.email) {
     emailService
       .sendPaymentReceived({
@@ -117,6 +166,7 @@ const markPaid = asyncHandler(async (req, res) => {
       })
       .catch(() => {});
   }
+
   if (owner?.phone && invoice?.invoiceNumber) {
     smsService
       .sendPaymentReceived({
@@ -129,7 +179,6 @@ const markPaid = asyncHandler(async (req, res) => {
       .catch(() => {});
   }
 
-  // ── Admin notification ──
   const admins = await SuperAdmin.find({ status: 'active' }).select('email').lean();
   const daysSince = tenant?.registeredAt
     ? Math.floor((Date.now() - new Date(tenant.registeredAt).getTime()) / 86_400_000)
@@ -198,6 +247,7 @@ const markFailed = asyncHandler(async (req, res) => {
       })
       .catch(() => {});
   }
+
   if (owner?.phone) {
     smsService
       .sendSubscriptionFailed({

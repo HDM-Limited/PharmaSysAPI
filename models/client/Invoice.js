@@ -14,11 +14,14 @@ const itemSchema = new mongoose.Schema(
 );
 
 const STATUSES = ['draft', 'sent', 'paid', 'overdue', 'cancelled'];
+const PURPOSES = ['registration', 'renewal', 'upgrade', 'sale'];
 
 const schema = new mongoose.Schema(
   {
     tenantId: { type: mongoose.Schema.Types.ObjectId, ref: 'Tenant', required: true, index: true },
     invoiceNumber: { type: String, required: true },
+    purpose: { type: String, enum: PURPOSES, default: 'registration', index: true },
+    planCode: { type: String, default: null },
     customerId: { type: mongoose.Schema.Types.ObjectId, default: null },
     customerSnapshot: {
       name: { type: String, default: null },
@@ -41,6 +44,8 @@ const schema = new mongoose.Schema(
     issuedAt: { type: Date, default: Date.now },
     sentAt: { type: Date, default: null },
     paidAt: { type: Date, default: null },
+    approvedAt: { type: Date, default: null, index: true },                       // ← new
+    approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'SuperAdmin', default: null }, // ← new
     notes: { type: String, default: null },
     paymentInstructions: { type: [Object], default: [] },
     stkLastRequest: {
@@ -55,6 +60,8 @@ const schema = new mongoose.Schema(
 
 schema.index({ tenantId: 1, invoiceNumber: 1 }, { unique: true });
 schema.index({ tenantId: 1, status: 1, createdAt: -1 });
+schema.index({ tenantId: 1, purpose: 1, createdAt: -1 });
+schema.index({ purpose: 1, approvedAt: 1, status: 1 });                            // ← new
 
 schema.set('toJSON', {
   virtuals: true,

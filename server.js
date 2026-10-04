@@ -86,8 +86,13 @@ async function bootstrap() {
   app.use(cors(corsOptions));
   app.options(/.*/, cors(corsOptions));
 
+  /* ─── body parsers ─── */
+  // Webhook-specific (must run BEFORE the global json parser)
   app.use('/api/live/webhooks/stripe', express.raw({ type: 'application/json' }));
+  app.use('/api/live/webhooks/mpesa', express.json({ limit: '1mb' }));
+  app.use('/api/live/webhooks/mpesa/timeout', express.json({ limit: '1mb' }));
 
+  // Global parsers
   app.use(express.json({ limit: '1mb' }));
   app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
@@ -105,7 +110,7 @@ async function bootstrap() {
     },
   }));
 
-  /* ─── static brand assets (logo, favicon for emails) ─── */
+  /* ─── static brand assets ─── */
   app.use('/brand', express.static('public/brand'));
 
   /* ─── informational routes ─── */
@@ -158,7 +163,7 @@ async function bootstrap() {
     });
   });
 
-  /* ─── routes ─── */
+  /* ─── API routes ─── */
   app.use('/api', routes);
 
   /* ─── terminal middleware ─── */
@@ -233,7 +238,6 @@ async function bootstrap() {
 
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
-
   process.once('SIGUSR2', () => shutdown('SIGUSR2'));
 
   process.on('unhandledRejection', (reason) => {

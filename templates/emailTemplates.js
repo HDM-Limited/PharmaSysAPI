@@ -612,8 +612,127 @@ const paymentRefunded = ({ brand, businessName, customerName, amount, currency, 
 };
 
 /* ═══════════════════════════════════════════════════════════
-   SUBSCRIPTION
+   SUBSCRIPTION — RENEWAL
    ═══════════════════════════════════════════════════════════ */
+
+const renewalRequestReceived = ({ brand, name, businessName, planName, amount, currency, invoiceNumber, dueDate, paymentLink }) => {
+  const b = normalizeBrand(brand);
+  return {
+    subject: `Renewal request received — ${businessName}`,
+    html: layout(b, {
+      title: 'Renewal request received',
+      preheader: `We've received your renewal request`,
+      body: `
+        <p style="margin:0 0 12px 0;">Hi <strong>${escapeHtml(name)}</strong>,</p>
+        <p style="margin:0 0 16px 0;">We've received your request to renew <strong>${escapeHtml(planName)}</strong> for <strong>${escapeHtml(businessName)}</strong>.</p>
+        ${cardBox(`
+          <p style="margin:0 0 10px 0;font-size:13px;font-weight:600;color:#0f172a;">Your renewal invoice</p>
+          ${kv('Amount', escapeHtml(money(amount, currency)), { bold: true, color: b.accent })}
+          ${kv('Invoice', escapeHtml(invoiceNumber), { mono: true })}
+          ${dueDate ? kv('Pay before', escapeHtml(dueDate), { bold: true }) : ''}
+        `, '#eff6ff', '#bfdbfe')}
+        <p style="margin:16px 0 0 0;">Once payment is received, your plan extends automatically.</p>
+      `,
+      cta: paymentLink ? cta(paymentLink, 'Pay renewal invoice') : null,
+    }),
+    text: plain([
+      `Hi ${name},`, '', `Renewal request received for ${businessName}.`,
+      `Plan: ${planName}`, `Amount: ${money(amount, currency)}`, `Invoice: ${invoiceNumber}`,
+      dueDate ? `Pay before: ${dueDate}` : '', paymentLink || '', '', supportLine(b),
+    ]),
+  };
+};
+
+const upgradeRequestReceived = ({ brand, name, businessName, fromPlan, toPlan, amount, currency, invoiceNumber, dueDate, paymentLink }) => {
+  const b = normalizeBrand(brand);
+  return {
+    subject: `Upgrade request received — ${businessName}`,
+    html: layout(b, {
+      title: 'Upgrade request received',
+      preheader: `Upgrade ${fromPlan} → ${toPlan}`,
+      body: `
+        <p style="margin:0 0 12px 0;">Hi <strong>${escapeHtml(name)}</strong>,</p>
+        <p style="margin:0 0 16px 0;">We've received your request to upgrade <strong>${escapeHtml(businessName)}</strong> from <strong>${escapeHtml(fromPlan)}</strong> to <strong>${escapeHtml(toPlan)}</strong>.</p>
+        ${cardBox(`
+          <p style="margin:0 0 10px 0;font-size:13px;font-weight:600;color:#0f172a;">Prorated upgrade</p>
+          <p style="margin:0 0 12px 0;font-size:12px;color:#334155;">You only pay the difference for the remaining days on your current plan.</p>
+          ${kv('From', escapeHtml(fromPlan))}
+          ${kv('To', escapeHtml(toPlan), { bold: true, color: b.accent })}
+          ${kv('Amount due', escapeHtml(money(amount, currency)), { bold: true, color: b.accent })}
+          ${kv('Invoice', escapeHtml(invoiceNumber), { mono: true })}
+          ${dueDate ? kv('Pay before', escapeHtml(dueDate), { bold: true }) : ''}
+        `, '#eff6ff', '#bfdbfe')}
+        <p style="margin:16px 0 0 0;">Once approved by our team, the new plan takes effect immediately.</p>
+      `,
+      cta: paymentLink ? cta(paymentLink, 'Pay upgrade invoice') : null,
+    }),
+    text: plain([
+      `Hi ${name},`, '', `Upgrade request received for ${businessName}.`,
+      `${fromPlan} → ${toPlan}`, `Amount due: ${money(amount, currency)}`, `Invoice: ${invoiceNumber}`,
+      dueDate ? `Pay before: ${dueDate}` : '', paymentLink || '', '', supportLine(b),
+    ]),
+  };
+};
+
+const renewalApproved = ({ brand, name, businessName, planName, amount, currency, periodStart, periodEnd, reference, loginUrl }) => {
+  const b = normalizeBrand(brand);
+  return {
+    subject: `Renewal approved — ${planName} extended`,
+    html: layout(b, {
+      title: 'Renewal approved',
+      preheader: `Your ${planName} plan has been extended`,
+      body: `
+        <p style="margin:0 0 12px 0;">Hi <strong>${escapeHtml(name)}</strong>,</p>
+        <p style="margin:0 0 16px 0;">Your renewal for <strong>${escapeHtml(businessName)}</strong> has been confirmed.</p>
+        ${cardBox(`
+          ${kv('Plan', escapeHtml(planName), { bold: true, color: b.accent })}
+          ${amount !== undefined ? kv('Amount paid', escapeHtml(money(amount, currency)), { bold: true }) : ''}
+          ${periodStart ? kv('New period', `${escapeHtml(humanDate(periodStart))} → ${escapeHtml(humanDate(periodEnd))}`) : ''}
+          ${periodEnd ? kv('Active until', escapeHtml(humanDate(periodEnd)), { bold: true }) : ''}
+          ${reference ? kv('Reference', escapeHtml(reference), { mono: true }) : ''}
+        `, '#f0fdf4', '#bbf7d0')}
+        <p style="margin:16px 0 0 0;">You're all set. Continue running your pharmacy.</p>
+      `,
+      cta: loginUrl ? cta(loginUrl, 'Go to dashboard') : null,
+    }),
+    text: plain([
+      `Hi ${name},`, '', `Renewal approved for ${businessName}.`,
+      `Plan: ${planName}`, amount !== undefined ? `Amount: ${money(amount, currency)}` : '',
+      periodEnd ? `Active until: ${humanDate(periodEnd)}` : '', reference ? `Reference: ${reference}` : '',
+      loginUrl || '', '', supportLine(b),
+    ]),
+  };
+};
+
+const upgradeApproved = ({ brand, name, businessName, fromPlan, toPlan, planLimits, planFeatures, amount, currency, periodStart, periodEnd, reference, loginUrl }) => {
+  const b = normalizeBrand(brand);
+  return {
+    subject: `Upgrade approved — you're now on ${toPlan}`,
+    html: layout(b, {
+      title: 'Upgrade approved',
+      preheader: `${businessName} is now on ${toPlan}`,
+      body: `
+        <p style="margin:0 0 12px 0;">Hi <strong>${escapeHtml(name)}</strong>,</p>
+        <p style="margin:0 0 16px 0;">Your upgrade for <strong>${escapeHtml(businessName)}</strong> from <strong>${escapeHtml(fromPlan)}</strong> to <strong>${escapeHtml(toPlan)}</strong> has been approved.</p>
+        ${cardBox(`
+          ${kv('New plan', escapeHtml(toPlan), { bold: true, color: b.accent })}
+          ${amount !== undefined ? kv('Amount paid', escapeHtml(money(amount, currency)), { bold: true }) : ''}
+          ${periodStart ? kv('New period', `${escapeHtml(humanDate(periodStart))} → ${escapeHtml(humanDate(periodEnd))}`) : ''}
+          ${periodEnd ? kv('Active until', escapeHtml(humanDate(periodEnd)), { bold: true }) : ''}
+          ${reference ? kv('Reference', escapeHtml(reference), { mono: true }) : ''}
+        `, '#f0fdf4', '#bbf7d0')}
+        ${planCard({ planName: toPlan, planLimits, planFeatures, startDate: null, endDate: null, trialDays: 0 })}
+      `,
+      cta: loginUrl ? cta(loginUrl, 'Go to dashboard') : null,
+    }),
+    text: plain([
+      `Hi ${name},`, '', `Upgrade approved for ${businessName}.`,
+      `${fromPlan} → ${toPlan}`, amount !== undefined ? `Amount: ${money(amount, currency)}` : '',
+      periodEnd ? `Active until: ${humanDate(periodEnd)}` : '', reference ? `Reference: ${reference}` : '',
+      loginUrl || '', '', supportLine(b),
+    ]),
+  };
+};
 
 const subscriptionPaid = ({ brand, businessName, planName, amount, currency, periodStart, periodEnd, reference }) => {
   const b = normalizeBrand(brand);
@@ -816,6 +935,76 @@ const adminPaymentReceived = ({
       '',
       reviewUrl ? `Review: ${reviewUrl}` : '',
       '', supportLine(b),
+    ]),
+  };
+};
+
+const adminRenewalRequested = ({ brand, businessName, ownerName, ownerEmail, ownerPhone, planName, amount, currency, invoiceNumber, dueDate, reviewUrl }) => {
+  const b = normalizeBrand(brand);
+  return {
+    subject: `Renewal requested — ${businessName}`,
+    html: layout(b, {
+      title: 'Renewal requested',
+      preheader: `${businessName} requested a renewal`,
+      body: `
+        <p style="margin:0 0 12px 0;">A tenant requested a renewal. Monitor for payment, then approve if needed.</p>
+        ${cardBox(`
+          ${kv('Business', escapeHtml(businessName), { bold: true })}
+          ${kv('Plan', escapeHtml(planName), { color: b.accent })}
+          ${kv('Amount', escapeHtml(money(amount, currency)), { bold: true })}
+          ${kv('Invoice', escapeHtml(invoiceNumber), { mono: true })}
+          ${dueDate ? kv('Due', escapeHtml(dueDate)) : ''}
+        `, '#eff6ff', '#bfdbfe')}
+        ${cardBox(`
+          ${kv('Owner', escapeHtml(ownerName))}
+          ${kv('Email', escapeHtml(ownerEmail))}
+          ${ownerPhone ? kv('Phone', escapeHtml(ownerPhone)) : ''}
+        `)}
+        <p style="margin:16px 0 0 0;">Renewals auto-extend on payment — no action needed unless you want to intervene.</p>
+      `,
+      cta: reviewUrl ? cta(reviewUrl, 'View in admin') : null,
+    }),
+    text: plain([
+      `${businessName} requested a renewal.`, `Plan: ${planName}`, `Amount: ${money(amount, currency)}`,
+      `Invoice: ${invoiceNumber}`, dueDate ? `Due: ${dueDate}` : '',
+      '', `Owner: ${ownerName} <${ownerEmail}>${ownerPhone ? ` · ${ownerPhone}` : ''}`,
+      '', reviewUrl ? `View: ${reviewUrl}` : '', '', supportLine(b),
+    ]),
+  };
+};
+
+const adminUpgradeRequested = ({ brand, businessName, ownerName, ownerEmail, ownerPhone, fromPlan, toPlan, amount, currency, invoiceNumber, dueDate, reviewUrl }) => {
+  const b = normalizeBrand(brand);
+  return {
+    subject: `Upgrade requested — ${businessName} (${fromPlan} → ${toPlan})`,
+    html: layout(b, {
+      title: 'Upgrade requested',
+      preheader: `${businessName} wants to upgrade`,
+      body: `
+        <p style="margin:0 0 12px 0;">A tenant requested a plan upgrade. Approval is required once payment is received.</p>
+        ${cardBox(`
+          ${kv('Business', escapeHtml(businessName), { bold: true })}
+          ${kv('From', escapeHtml(fromPlan))}
+          ${kv('To', escapeHtml(toPlan), { bold: true, color: b.accent })}
+          ${kv('Amount due', escapeHtml(money(amount, currency)), { bold: true })}
+          ${kv('Invoice', escapeHtml(invoiceNumber), { mono: true })}
+          ${dueDate ? kv('Due', escapeHtml(dueDate)) : ''}
+        `, '#eff6ff', '#bfdbfe')}
+        ${cardBox(`
+          ${kv('Owner', escapeHtml(ownerName))}
+          ${kv('Email', escapeHtml(ownerEmail))}
+          ${ownerPhone ? kv('Phone', escapeHtml(ownerPhone)) : ''}
+        `)}
+        <p style="margin:16px 0 0 0;">Upgrades require manual approval after payment lands.</p>
+      `,
+      cta: reviewUrl ? cta(reviewUrl, 'Review upgrade') : null,
+    }),
+    text: plain([
+      `${businessName} requested an upgrade.`,
+      `${fromPlan} → ${toPlan}`, `Amount due: ${money(amount, currency)}`,
+      `Invoice: ${invoiceNumber}`, dueDate ? `Due: ${dueDate}` : '',
+      '', `Owner: ${ownerName} <${ownerEmail}>${ownerPhone ? ` · ${ownerPhone}` : ''}`,
+      '', reviewUrl ? `Review: ${reviewUrl}` : '', '', supportLine(b),
     ]),
   };
 };
@@ -1124,6 +1313,11 @@ module.exports = {
   invoiceCancelled,
   paymentRefunded,
 
+  renewalRequestReceived,
+  upgradeRequestReceived,
+  renewalApproved,
+  upgradeApproved,
+
   subscriptionPaid,
   subscriptionExpiring,
   subscriptionExpired,
@@ -1134,6 +1328,8 @@ module.exports = {
   adminWelcome,
   adminNewPending,
   adminPaymentReceived,
+  adminRenewalRequested,
+  adminUpgradeRequested,
   adminServiceDown,
   adminBackupFailed,
   adminBackupSuccess,

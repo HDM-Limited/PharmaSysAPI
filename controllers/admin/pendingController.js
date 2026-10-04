@@ -23,43 +23,200 @@ function computePeriodEnd(cycle, from = new Date()) {
   return addMonths(from, 1);
 }
 
-/* ─────────────── LIST ─────────────── */
+/* ═════════════════════════════════════════════════════════════════
+   COLLECTORS
+   ═════════════════════════════════════════════════════════════════ */
 
-const list = asyncHandler(async (req, res) => {
-  const { page, limit, skip } = parsePagination(req.query);
-  const filter = { status: { $in: ['pending', 'in_review'] } };
+async function collectRegistrations() {
+  const pendings = await PendingActivation.find({
+    status: { $in: ['pending', 'in_review'] },
+  })
+    .sort({ priority: -1, registeredAt: 1 })
+    .lean();
 
-  const [items, total] = await Promise.all([
-    PendingActivation.find(filter).sort({ priority: -1, registeredAt: 1 }).skip(skip).limit(limit).lean(),
-    PendingActivation.countDocuments(filter),
-  ]);
+  if (!pendings.length) return [];
 
-  const tenantIds = items.map((i) => i.tenantId);
+  const tenantIds = pendings.map((p) => p.tenantId);
+
   const [tenants, owners, invoices] = await Promise.all([
     Tenant.find({ _id: { $in: tenantIds } }).lean(),
     User.find({ __allowGlobal: true, tenantId: { $in: tenantIds }, role: 'owner' })
-      .select('tenantId fullName email phone')
+      .select('tenantId fullName email phone status')
       .lean(),
     Invoice.find({ __allowGlobal: true, tenantId: { $in: tenantIds } })
-      .select('tenantId invoiceNumber total amountDue currency status dueDate issuedAt')
+      .sort({ createdAt: -1 })
+      .select('tenantId invoiceNumber purpose total amountDue currency status issuedAt dueDate')
       .lean(),
   ]);
 
-  const tenantsById = Object.fromEntries(tenants.map((t) => [String(t._id), t]));
-  const ownersByTenant = Object.fromEntries(owners.map((o) => [String(o.tenantId), o]));
-  const invoicesByTenant = Object.fromEntries(invoices.map((i) => [String(i.tenantId), i]));
+  const tenantMap = Object.fromEntries(tenants.map((t) => [String(t._id), t]));
+  const ownerMap = Object.fromEntries(owners.map((o) => [String(o.tenantId), o]));
+  const invoiceMap = {};
+  for (const inv of invoices) {
+    const k = String(inv.tenantId);
+    if (!invoiceMap[k]) invoiceMap[k] = inv;
+  }
 
-  const enriched = items.map((i) => ({
-    ...i,
-    tenant: tenantsById[String(i.tenantId)] || null,
-    owner: ownersByTenant[String(i.tenantId)] || null,
-    invoice: invoicesByTenant[String(i.tenantId)] || null,
+  return pendings.map((p) => ({
+    id: String(p._id),
+    kind: 'registration',
+    status: p.status,
+    priority: p.priority,
+    registeredAt: p.registeredAt,
+    reviewedAt: p.reviewedAt,
+    tenant: tenantMap[String(p.tenantId)] || null,
+    owner: ownerMap[String(p.tenantId)] || null,
+    invoice: invoiceMap[String(p.tenantId)] || null,
   }));
+}
 
-  return paginated(res, enriched, page, limit, total);
+async function collectInvoicesByPurpose(purpose) {
+  const invoices = await Invoice.find({
+    __allowGlobal: true,
+    purpose,
+    approvedAt: null,
+    status: { $in: ['sent', 'overdue', 'paid'] },
+  })
+    .sort({ createdAt: -1 })
+    .lean();
+
+  if (!invoices.length) return [];
+
+  const tenantIds = [...new Set(invoices.map((i) => String(i.tenantId)))];
+
+  const [tenants, owners, plans] = await Promise.all([
+    Tenant.find({ _id: { $in: tenantIds } })
+      .select('name slug planCode country status expiresAt')
+      .lean(),
+    User.find({ __allowGlobal: true, tenantId: { $in: tenantIds }, role: 'owner' })
+      .select('tenantId fullName email phone')
+      .lean(),
+    Plan.find().select('code name price').lean(),
+  ]);
+
+  const tenantMap = Object.fromEntries(tenants.map((t) => [String(t._id), t]));
+  const ownerMap = Object.fromEntries(owners.map((o) => [String(o.tenantId), o]));
+  const planMap = Object.fromEntries(plans.map((p) => [p.code, p]));
+
+  return invoices.map((inv) => {
+    const tenant = tenantMap[String(inv.tenantId)] || null;
+    return {
+      id: String(inv._id),
+      kind: purpose,
+      status: inv.status,
+      invoiceNumber: inv.invoiceNumber,
+      planCode: inv.planCode,
+      currentPlan: tenant ? planMap[tenant.planCode] || null : null,
+      targetPlan: inv.planCode ? planMap[inv.planCode] || null : null,
+      items: inv.items,
+      subtotal: inv.subtotal,
+      discount: inv.discount,
+      tax: inv.tax,
+      total: inv.total,
+      amountPaid: inv.amountPaid,
+      amountDue: inv.amountDue,
+      currency: inv.currency,
+      issuedAt: inv.issuedAt,
+      dueDate: inv.dueDate,
+      paidAt: inv.paidAt,
+      paymentMethod: inv.paymentMethod,
+      paymentRef: inv.paymentRef,
+      notes: inv.notes,
+      tenant,
+      owner: ownerMap[String(inv.tenantId)] || null,
+    };
+  });
+}
+
+function applySearch(items, search) {
+  if (!search) return items;
+  const q = String(search).trim().toLowerCase();
+  if (!q) return items;
+  return items.filter((it) => {
+    const n = it.tenant?.name?.toLowerCase() || '';
+    const s = it.tenant?.slug?.toLowerCase() || '';
+    const on = it.owner?.fullName?.toLowerCase() || '';
+    const oe = it.owner?.email?.toLowerCase() || '';
+    return n.includes(q) || s.includes(q) || on.includes(q) || oe.includes(q);
+  });
+}
+
+/* ═════════════════════════════════════════════════════════════════
+   LIST
+   ═════════════════════════════════════════════════════════════════ */
+
+const list = asyncHandler(async (req, res) => {
+  const filter = String(req.query.filter || 'all').toLowerCase();
+  const search = req.query.search || '';
+
+  const valid = ['all', 'registrations', 'renewals', 'upgrades'];
+  if (!valid.includes(filter)) {
+    throw ApiError.badRequest('INVALID_FILTER', `filter must be one of: ${valid.join(', ')}`);
+  }
+
+  const wantReg = filter === 'all' || filter === 'registrations';
+  const wantRen = filter === 'all' || filter === 'renewals';
+  const wantUpg = filter === 'all' || filter === 'upgrades';
+
+  const [reg, ren, upg] = await Promise.all([
+    wantReg ? collectRegistrations() : Promise.resolve([]),
+    wantRen ? collectInvoicesByPurpose('renewal') : Promise.resolve([]),
+    wantUpg ? collectInvoicesByPurpose('upgrade') : Promise.resolve([]),
+  ]);
+
+  const items = {
+    registrations: applySearch(reg, search),
+    renewals: applySearch(ren, search),
+    upgrades: applySearch(upg, search),
+  };
+
+  const list = filter === 'all'
+    ? [...items.registrations, ...items.renewals, ...items.upgrades]
+    : filter === 'registrations'
+      ? items.registrations
+      : filter === 'renewals'
+        ? items.renewals
+        : items.upgrades;
+
+  return ok(res, {
+    filter,
+    counts: {
+      registrations: reg.length,
+      renewals: ren.length,
+      upgrades: upg.length,
+    },
+    items,
+    list,
+  });
 });
 
-/* ─────────────── GET ─────────────── */
+/* ═════════════════════════════════════════════════════════════════
+   COUNTS
+   ═════════════════════════════════════════════════════════════════ */
+
+const counts = asyncHandler(async (_req, res) => {
+  const [registrations, renewals, upgrades] = await Promise.all([
+    PendingActivation.countDocuments({ status: { $in: ['pending', 'in_review'] } }),
+    Invoice.countDocuments({
+      __allowGlobal: true,
+      purpose: 'renewal',
+      approvedAt: null,
+      status: { $in: ['sent', 'overdue', 'paid'] },
+    }),
+    Invoice.countDocuments({
+      __allowGlobal: true,
+      purpose: 'upgrade',
+      approvedAt: null,
+      status: { $in: ['sent', 'overdue', 'paid'] },
+    }),
+  ]);
+
+  return ok(res, { registrations, renewals, upgrades });
+});
+
+/* ═════════════════════════════════════════════════════════════════
+   GET ONE
+   ═════════════════════════════════════════════════════════════════ */
 
 const get = asyncHandler(async (req, res) => {
   assertObjectId(req.params.id, 'pendingId');
@@ -75,7 +232,9 @@ const get = asyncHandler(async (req, res) => {
   return ok(res, { pending, tenant, owner, invoice });
 });
 
-/* ─────────────── APPROVE ─────────────── */
+/* ═════════════════════════════════════════════════════════════════
+   APPROVE (registration)
+   ═════════════════════════════════════════════════════════════════ */
 
 const approve = asyncHandler(async (req, res) => {
   assertObjectId(req.params.id, 'pendingId');
@@ -197,7 +356,9 @@ const approve = asyncHandler(async (req, res) => {
   return ok(res, { approved: true, tenantId: tenant._id });
 });
 
-/* ─────────────── REJECT ─────────────── */
+/* ═════════════════════════════════════════════════════════════════
+   REJECT
+   ═════════════════════════════════════════════════════════════════ */
 
 const reject = asyncHandler(async (req, res) => {
   assertObjectId(req.params.id, 'pendingId');
@@ -252,7 +413,9 @@ const reject = asyncHandler(async (req, res) => {
   return ok(res, { rejected: true });
 });
 
-/* ─────────────── CONFIRM PAYMENT ─────────────── */
+/* ═════════════════════════════════════════════════════════════════
+   CONFIRM PAYMENT
+   ═════════════════════════════════════════════════════════════════ */
 
 const confirmPayment = asyncHandler(async (req, res) => {
   assertObjectId(req.params.id, 'pendingId');
@@ -321,7 +484,6 @@ const confirmPayment = asyncHandler(async (req, res) => {
       .catch(() => {});
   }
 
-  // Notify all admins
   const SuperAdmin = require('../../models/admin/SuperAdmin');
   const admins = await SuperAdmin.find({ status: 'active' }).select('email').lean();
   const daysSince = tenant?.registeredAt
@@ -372,7 +534,9 @@ const confirmPayment = asyncHandler(async (req, res) => {
   });
 });
 
-/* ─────────────── ADD NOTES ─────────────── */
+/* ═════════════════════════════════════════════════════════════════
+   ADD NOTES
+   ═════════════════════════════════════════════════════════════════ */
 
 const addNotes = asyncHandler(async (req, res) => {
   assertObjectId(req.params.id, 'pendingId');
@@ -385,4 +549,4 @@ const addNotes = asyncHandler(async (req, res) => {
   return ok(res, pending);
 });
 
-module.exports = { list, get, approve, reject, confirmPayment, addNotes };
+module.exports = { list, counts, get, approve, reject, confirmPayment, addNotes };

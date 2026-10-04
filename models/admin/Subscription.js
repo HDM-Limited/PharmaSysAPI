@@ -22,6 +22,8 @@ const schema = new mongoose.Schema(
     autoRenew: { type: Boolean, default: false },
     cancelledAt: { type: Date, default: null },
     cancelledReason: { type: String, default: null },
+    lastRenewalAt: { type: Date, default: null },
+    renewalCount: { type: Number, default: 0 },
     stripeSubscriptionId: { type: String, default: null },
     stripeCustomerId: { type: String, default: null },
     metadata: { type: mongoose.Schema.Types.Mixed, default: {} },

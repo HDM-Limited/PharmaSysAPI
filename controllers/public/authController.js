@@ -10,6 +10,7 @@ const {
   verifyAccessToken,
 } = require('../../utils/jwt');
 const { slugify } = require('../../utils/slugify');
+const { generateInvoiceNumber } = require('../../utils/invoiceNumber');
 const { env } = require('../../config/env');
 
 const Tenant = require('../../models/admin/Tenant');
@@ -19,8 +20,10 @@ const Plan = require('../../models/admin/Plan');
 const PendingActivation = require('../../models/admin/PendingActivation');
 const SuperAdmin = require('../../models/admin/SuperAdmin');
 const UserInvitation = require('../../models/client/UserInvitation');
+const Invoice = require('../../models/client/Invoice');
 const emailService = require('../../services/emailService');
 const smsService = require('../../services/smsService');
+const paymentInstructionsService = require('../../services/paymentInstructionsService');
 
 /* ─────────────── helpers ─────────────── */
 
@@ -90,7 +93,6 @@ const register = asyncHandler(async (req, res) => {
     throw ApiError.badRequest('WEAK_PASSWORD', 'Password must be at least 8 characters');
   }
 
-  // Cross-tenant email check
   const existing = await User.findOne({ __allowGlobal: true, email: email.toLowerCase() }).lean();
   if (existing) throw ApiError.conflict('EMAIL_TAKEN', 'Email already registered');
 
@@ -141,15 +143,18 @@ const register = asyncHandler(async (req, res) => {
     slaDeadline: new Date(now.getTime() + 48 * 3600 * 1000),
   });
 
-  // Invoice (if plan costs money)
+  /* ─── Invoice (if paid plan) ─── */
   let invoice = null;
-  if (plan.price?.amount > 0) {
-    const Invoice = require('../../models/client/Invoice');
-    const { generateInvoiceNumber } = require('../../utils/invoiceNumber');
+  const planAmount = plan.price?.amount || 0;
+
+  if (planAmount > 0) {
     const invoiceNumber = generateInvoiceNumber('INV');
     const dueDate = new Date(now.getTime() + 3 * 3600 * 1000);
     const currency = plan.price.currency || 'KES';
-    const amount = plan.price.amount;
+
+    const instructions = await paymentInstructionsService
+      .getPaymentInstructions({ amount: planAmount, currency, invoiceNumber })
+      .catch(() => []);
 
     invoice = await Invoice.create({
       tenantId: tenant._id,
@@ -166,28 +171,28 @@ const register = asyncHandler(async (req, res) => {
           name: `${plan.name} Plan`,
           description: `${plan.price.interval} · ${tenant.name}`,
           qty: 1,
-          unitPrice: amount,
-          subtotal: amount,
+          unitPrice: planAmount,
+          subtotal: planAmount,
         },
       ],
-      subtotal: amount,
+      subtotal: planAmount,
       discount: 0,
       tax: 0,
-      total: amount,
+      total: planAmount,
       amountPaid: 0,
-      amountDue: amount,
+      amountDue: planAmount,
       currency,
       status: 'sent',
       dueDate,
       issuedAt: now,
       sentAt: now,
       notes: 'Payment due within 3 hours.',
-      paymentInstructions: [],
+      paymentInstructions: instructions,
       createdBy: owner._id,
     });
   }
 
-  // Emails
+  /* ─── Emails ─── */
   if (owner.email) {
     emailService
       .sendRegistrationReceived({
@@ -196,7 +201,7 @@ const register = asyncHandler(async (req, res) => {
         name: owner.fullName,
         businessName: tenant.name,
         planName: plan.name,
-        amount: plan.price?.amount || 0,
+        amount: planAmount,
         currency: plan.price?.currency || 'KES',
         dueDate: invoice?.dueDate ? invoice.dueDate.toISOString() : null,
         invoiceNumber: invoice?.invoiceNumber || null,
@@ -381,8 +386,6 @@ const logout = asyncHandler(async (_req, res) => {
 /* ─────────────── ME ─────────────── */
 
 const me = asyncHandler(async (req, res) => {
-  // req.user and req.tenantId are set by authenticateTenant.
-  // Wrap plugin-scoped read in explicit tenant filter.
   const user = await User.findOne({
     __allowGlobal: true,
     _id: req.user._id,
