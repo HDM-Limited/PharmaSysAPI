@@ -1,5 +1,6 @@
 const { asyncHandler } = require('../../utils/asyncHandler');
 const { logger } = require('../../utils/logger');
+const { env } = require('../../config/env');
 const mpesaService = require('../../services/mpesaService');
 const emailService = require('../../services/emailService');
 const smsService = require('../../services/smsService');
@@ -7,10 +8,12 @@ const Payment = require('../../models/client/Payment');
 const Invoice = require('../../models/client/Invoice');
 const Tenant = require('../../models/admin/Tenant');
 const User = require('../../models/client/User');
+const SuperAdmin = require('../../models/admin/SuperAdmin');
+const Plan = require('../../models/admin/Plan');
 
-/* ─────────────── helpers ─────────────── */
+/* ─────────────── NOTIFY OWNER ─────────────── */
 
-async function notifyInvoicePaid(invoice, method, reference) {
+async function notifyOwnerPaid(invoice, method, reference) {
   try {
     const tenant = await Tenant.findById(invoice.tenantId).lean();
     const owner = await User.findOne({
@@ -22,6 +25,8 @@ async function notifyInvoicePaid(invoice, method, reference) {
       .lean();
 
     if (!owner) return;
+
+    const plan = await Plan.findOne({ code: tenant?.planCode }).lean();
 
     if (owner.email) {
       emailService
@@ -37,10 +42,17 @@ async function notifyInvoicePaid(invoice, method, reference) {
           paymentMethod: method,
           paymentReference: reference || null,
           notes: null,
+          planName: plan?.name || tenant?.planCode,
+          planLimits: plan?.limits,
+          planFeatures: plan?.features,
+          startDate: new Date().toLocaleDateString('en-KE', { dateStyle: 'medium' }),
+          endDate: tenant?.expiresAt
+            ? new Date(tenant.expiresAt).toLocaleDateString('en-KE', { dateStyle: 'medium' })
+            : null,
+          trialDays: plan?.trialDays || 0,
+          interval: plan?.price?.interval || 'month',
         })
-        .catch((err) =>
-          logger.warn({ err: err.message, invoiceNumber: invoice.invoiceNumber }, 'paymentReceived email failed')
-        );
+        .catch((err) => logger.warn({ err: err.message }, 'owner payment email failed'));
     }
 
     if (owner.phone) {
@@ -54,20 +66,62 @@ async function notifyInvoicePaid(invoice, method, reference) {
         })
         .catch(() => {});
     }
-
-    logger.info(
-      { invoiceNumber: invoice.invoiceNumber, method, reference },
-      'paymentReceived notification sent'
-    );
   } catch (err) {
-    logger.error(
-      { err: err.message, invoiceNumber: invoice.invoiceNumber },
-      'paymentReceived notification error'
-    );
+    logger.error({ err: err.message, invoiceNumber: invoice.invoiceNumber }, 'notifyOwnerPaid failed');
   }
 }
 
-/* ─────────────── mpesa callback ─────────────── */
+/* ─────────────── NOTIFY ADMINS ─────────────── */
+
+async function notifyAdminsPaid(invoice, method, reference) {
+  try {
+    const admins = await SuperAdmin.find({ status: 'active' }).select('email').lean();
+    if (!admins.length) return;
+
+    const tenant = await Tenant.findById(invoice.tenantId).select('name planCode registeredAt').lean();
+    const owner = await User.findOne({
+      __allowGlobal: true,
+      tenantId: invoice.tenantId,
+      role: 'owner',
+    }).select('fullName email phone').lean();
+
+    const daysSince = tenant?.registeredAt
+      ? Math.floor((Date.now() - new Date(tenant.registeredAt).getTime()) / 86_400_000)
+      : undefined;
+
+    const reviewUrl = `${env.adminUrl}/pending`;
+
+    for (const admin of admins) {
+      emailService
+        .sendAdminPaymentReceived({
+          to: admin.email,
+          businessName: tenant?.name || '—',
+          ownerName: owner?.fullName || '—',
+          ownerEmail: owner?.email || '—',
+          ownerPhone: owner?.phone || null,
+          invoiceNumber: invoice.invoiceNumber,
+          amount: invoice.amountPaid,
+          currency: invoice.currency,
+          paidAt: invoice.paidAt?.toISOString() || new Date().toISOString(),
+          paymentMethod: method,
+          paymentReference: reference || null,
+          planName: null,
+          planCode: tenant?.planCode,
+          daysSinceRegistration: daysSince,
+          reviewUrl,
+        })
+        .catch((err) =>
+          logger.warn({ err: err.message, admin: admin.email }, 'admin payment email failed')
+        );
+    }
+
+    logger.info({ admins: admins.length, invoiceNumber: invoice.invoiceNumber }, 'admin payment notifications sent');
+  } catch (err) {
+    logger.error({ err: err.message }, 'notifyAdminsPaid failed');
+  }
+}
+
+/* ─────────────── MPESA CALLBACK ─────────────── */
 
 const mpesaCallback = asyncHandler(async (req, res) => {
   const parsed = mpesaService.parseCallback(req.body);
@@ -92,7 +146,7 @@ const mpesaCallback = asyncHandler(async (req, res) => {
 
   if (payment) {
     if (payment.status === 'success' || payment.status === 'failed') {
-      logger.warn({ paymentId: String(payment._id), status: payment.status }, 'payment already final');
+      logger.warn({ paymentId: String(payment._id) }, 'payment already final');
       return res.status(200).json({ ResultCode: 0, ResultDesc: 'Accepted' });
     }
 
@@ -122,11 +176,11 @@ const mpesaCallback = asyncHandler(async (req, res) => {
         invoice.paymentRef = parsed.mpesaReceiptNumber || null;
         await invoice.save();
 
-        await notifyInvoicePaid(invoice, 'mpesa_stk', parsed.mpesaReceiptNumber);
+        await notifyOwnerPaid(invoice, 'mpesa_stk', parsed.mpesaReceiptNumber);
+        await notifyAdminsPaid(invoice, 'mpesa_stk', parsed.mpesaReceiptNumber);
       }
     }
   } else {
-    // Fallback: find invoice by stkLastRequest
     const invoice = await Invoice.findOne({
       __allowGlobal: true,
       'stkLastRequest.checkoutRequestId': parsed.checkoutRequestId,
@@ -141,12 +195,10 @@ const mpesaCallback = asyncHandler(async (req, res) => {
       invoice.paymentRef = parsed.mpesaReceiptNumber || null;
       await invoice.save();
 
-      await notifyInvoicePaid(invoice, 'mpesa_stk', parsed.mpesaReceiptNumber);
+      await notifyOwnerPaid(invoice, 'mpesa_stk', parsed.mpesaReceiptNumber);
+      await notifyAdminsPaid(invoice, 'mpesa_stk', parsed.mpesaReceiptNumber);
     } else {
-      logger.warn(
-        { checkoutRequestId: parsed.checkoutRequestId },
-        'no payment or invoice matched the callback'
-      );
+      logger.warn({ checkoutRequestId: parsed.checkoutRequestId }, 'no payment or invoice matched');
     }
   }
 
@@ -163,8 +215,4 @@ const stripeWebhook = asyncHandler(async (req, res) => {
   return res.status(200).json({ received: true });
 });
 
-module.exports = {
-  mpesaCallback,
-  mpesaTimeout,
-  stripeWebhook,
-};
+module.exports = { mpesaCallback, mpesaTimeout, stripeWebhook };

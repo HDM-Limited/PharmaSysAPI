@@ -69,6 +69,7 @@ async function renderAndSend(templateFn, templateKey, { tenantId = null, scope =
 }
 
 /* ─── AUTH ─── */
+
 const sendVerification = ({ tenantId, recipientId, to, name, verifyUrl, expiresIn }) =>
   renderAndSend(emailTemplates.verification, 'verification', { tenantId, recipientId, to, data: { name, verifyUrl, expiresIn } });
 
@@ -78,8 +79,11 @@ const sendPasswordReset = ({ tenantId, recipientId, to, fullName, resetUrl, expi
 const sendPasswordChanged = ({ tenantId, recipientId, to, fullName, when, ip }) =>
   renderAndSend(emailTemplates.passwordChanged, 'password_changed', { tenantId, recipientId, to, data: { fullName, when, ip } });
 
-const sendWelcome = ({ tenantId, recipientId, to, name, businessName, email, temporaryPassword, loginUrl }) =>
-  renderAndSend(emailTemplates.welcome, 'welcome', { tenantId, recipientId, to, data: { name, businessName, email, temporaryPassword, loginUrl } });
+const sendWelcome = ({ tenantId, recipientId, to, name, businessName, email, temporaryPassword, loginUrl, planName, planLimits, planFeatures, startDate, endDate, trialDays, amount, currency, interval }) =>
+  renderAndSend(emailTemplates.welcome, 'welcome', {
+    tenantId, recipientId, to,
+    data: { name, businessName, email, temporaryPassword, loginUrl, planName, planLimits, planFeatures, startDate, endDate, trialDays, amount, currency, interval },
+  });
 
 const sendStaffWelcome = ({ tenantId, recipientId, to, fullName, businessName, email, temporaryPassword, role, loginUrl }) =>
   renderAndSend(emailTemplates.staffWelcome, 'staff_welcome', { tenantId, recipientId, to, data: { fullName, businessName, email, temporaryPassword, role, loginUrl } });
@@ -91,13 +95,18 @@ const sendRoleChanged = ({ tenantId, recipientId, to, fullName, businessName, ol
   renderAndSend(emailTemplates.roleChanged, 'role_changed', { tenantId, recipientId, to, data: { fullName, businessName, oldRole, newRole } });
 
 /* ─── REGISTRATION ─── */
+
 const sendRegistrationReceived = ({ tenantId, recipientId, to, name, businessName, planName, amount, currency, dueDate, invoiceNumber, paymentLink }) =>
   renderAndSend(emailTemplates.registrationReceived, 'registration_received', { tenantId, recipientId, to, data: { name, businessName, planName, amount, currency, dueDate, invoiceNumber, paymentLink } });
 
 const sendRegistrationRejected = ({ tenantId, recipientId, to, name, businessName, reason }) =>
   renderAndSend(emailTemplates.registrationRejected, 'registration_rejected', { tenantId, recipientId, to, data: { name, businessName, reason } });
 
+const sendTenantReactivated = ({ tenantId, recipientId, to, fullName, businessName, loginUrl }) =>
+  renderAndSend(emailTemplates.tenantReactivated, 'tenant_reactivated', { tenantId, recipientId, to, data: { fullName, businessName, loginUrl } });
+
 /* ─── BILLING ─── */
+
 const sendInvoice = ({ tenantId, to, ...data }) =>
   renderAndSend(emailTemplates.invoice, 'invoice', { tenantId, to, data });
 
@@ -134,15 +143,16 @@ const sendPlanUpgraded = ({ tenantId, to, ...data }) =>
 const sendPlanCancelled = ({ tenantId, to, ...data }) =>
   renderAndSend(emailTemplates.planCancelled, 'plan_cancelled', { tenantId, to, data });
 
-const sendTenantReactivated = ({ tenantId, to, ...data }) =>
-  renderAndSend(emailTemplates.tenantReactivated, 'tenant_reactivated', { tenantId, to, data });
+/* ─── ADMIN ─── */
 
-/* ─── ADMIN (scope: admin) ─── */
 const sendAdminWelcome = ({ to, recipientId = null, ...data }) =>
   renderAndSend(emailTemplates.adminWelcome, 'admin_welcome', { tenantId: null, scope: 'admin', recipientId, to, data });
 
 const sendAdminNewPending = ({ to, ...data }) =>
   renderAndSend(emailTemplates.adminNewPending, 'admin_new_pending', { tenantId: null, scope: 'admin', to, data });
+
+const sendAdminPaymentReceived = ({ to, ...data }) =>
+  renderAndSend(emailTemplates.adminPaymentReceived, 'admin_payment_received', { tenantId: null, scope: 'admin', to, data });
 
 const sendAdminServiceDown = ({ to, ...data }) =>
   renderAndSend(emailTemplates.adminServiceDown, 'admin_service_down', { tenantId: null, scope: 'admin', to, data });
@@ -157,6 +167,7 @@ const sendAdminRestoreComplete = ({ to, ...data }) =>
   renderAndSend(emailTemplates.adminRestoreComplete, 'admin_restore_complete', { tenantId: null, scope: 'admin', to, data });
 
 /* ─── PHARMA ─── */
+
 const sendLowStockAlert = ({ tenantId, to, ...data }) =>
   renderAndSend(emailTemplates.lowStockAlert, 'low_stock_alert', { tenantId, to, data });
 
@@ -170,6 +181,7 @@ const sendPrescriptionReady = ({ tenantId, to, ...data }) =>
   renderAndSend(emailTemplates.prescriptionReady, 'prescription_ready', { tenantId, to, data });
 
 /* ─── REPORTS ─── */
+
 const sendDailySummary = ({ tenantId, to, ...data }) =>
   renderAndSend(emailTemplates.dailySummary, 'daily_summary', { tenantId, to, data });
 
@@ -177,6 +189,7 @@ const sendWeeklyReport = ({ tenantId, to, ...data }) =>
   renderAndSend(emailTemplates.weeklyReport, 'weekly_report', { tenantId, to, data });
 
 /* ─── SUPPLIER ─── */
+
 const sendPurchaseOrder = ({ tenantId, to, ...data }) =>
   renderAndSend(emailTemplates.purchaseOrder, 'purchase_order', { tenantId, to, data });
 
@@ -184,6 +197,7 @@ const sendPurchaseOrderCancelled = ({ tenantId, to, ...data }) =>
   renderAndSend(emailTemplates.purchaseOrderCancelled, 'purchase_order_cancelled', { tenantId, to, data });
 
 /* ─── GENERIC ─── */
+
 const sendGeneric = ({ tenantId = null, scope = null, recipientId = null, to, subject, html, text, template = 'generic' }) =>
   send({ tenantId, scope, recipientId, to, subject, html, text, template });
 
@@ -202,6 +216,7 @@ module.exports = {
 
   sendRegistrationReceived,
   sendRegistrationRejected,
+  sendTenantReactivated,
 
   sendInvoice,
   sendPaymentReceived,
@@ -215,10 +230,10 @@ module.exports = {
   sendSubscriptionFailed,
   sendPlanUpgraded,
   sendPlanCancelled,
-  sendTenantReactivated,
 
   sendAdminWelcome,
   sendAdminNewPending,
+  sendAdminPaymentReceived,
   sendAdminServiceDown,
   sendAdminBackupFailed,
   sendAdminBackupSuccess,

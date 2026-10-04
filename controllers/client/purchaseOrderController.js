@@ -7,8 +7,12 @@ const { ApiError } = require('../../utils/apiError');
 
 const PurchaseOrder = require('../../models/client/PurchaseOrder');
 const Supplier = require('../../models/client/Supplier');
+const Branch = require('../../models/client/Branch');
+const Tenant = require('../../models/admin/Tenant');
+const User = require('../../models/client/User');
 const { Drug, Batch, StockMovement } = require('../../models/client/Inventory');
 const emailService = require('../../services/emailService');
+const notificationService = require('../../services/notificationService');
 
 function generatePoNo() {
   const now = new Date();
@@ -18,6 +22,8 @@ function generatePoNo() {
   const rand = crypto.randomBytes(2).toString('hex').toUpperCase();
   return `PO-${y}${m}${d}-${rand}`;
 }
+
+/* ─────────────── LIST ─────────────── */
 
 const list = asyncHandler(async (req, res) => {
   const { page, limit, skip } = parsePagination(req.query);
@@ -39,6 +45,8 @@ const list = asyncHandler(async (req, res) => {
   return paginated(res, items, page, limit, total);
 });
 
+/* ─────────────── GET ─────────────── */
+
 const get = asyncHandler(async (req, res) => {
   assertObjectId(req.params.id, 'poId');
   const po = await PurchaseOrder.findOne({
@@ -51,6 +59,8 @@ const get = asyncHandler(async (req, res) => {
   if (!po) throw ApiError.notFound('PO_NOT_FOUND', 'Purchase order not found');
   return ok(res, po);
 });
+
+/* ─────────────── CREATE ─────────────── */
 
 const create = asyncHandler(async (req, res) => {
   const { supplierId, items, notes = null } = req.body;
@@ -115,6 +125,8 @@ const create = asyncHandler(async (req, res) => {
   return created(res, po.toObject());
 });
 
+/* ─────────────── RECEIVE ─────────────── */
+
 const receive = asyncHandler(async (req, res) => {
   assertObjectId(req.params.id, 'poId');
   const { items } = req.body;
@@ -175,8 +187,37 @@ const receive = asyncHandler(async (req, res) => {
   po.receivedAt = new Date();
   await po.save();
 
+  // Notify owner + branch managers
+  const tenant = await Tenant.findById(req.tenantId).select('name').lean();
+  const branch = await Branch.findById(branchId).select('name').lean();
+
+  const recipients = await User.find({
+    __allowGlobal: true,
+    tenantId: req.tenantId,
+    status: 'active',
+    $or: [{ role: 'owner' }, { role: 'branch_manager', branchIds: branchId }],
+  })
+    .select('_id')
+    .lean();
+
+  for (const r of recipients) {
+    notificationService
+      .create({
+        tenantId: req.tenantId,
+        userId: r._id,
+        branchId,
+        type: 'inventory',
+        title: `Stock received — ${po.poNo}`,
+        body: `${items.length} line(s) received${branch?.name ? ` at ${branch.name}` : ''}`,
+        link: `/app/purchase-orders/${po._id}`,
+      })
+      .catch(() => {});
+  }
+
   return ok(res, po.toObject());
 });
+
+/* ─────────────── CANCEL ─────────────── */
 
 const cancel = asyncHandler(async (req, res) => {
   assertObjectId(req.params.id, 'poId');

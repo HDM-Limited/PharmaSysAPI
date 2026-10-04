@@ -3,12 +3,18 @@ const { ok, created, paginated } = require('../../utils/apiResponse');
 const { parsePagination } = require('../../utils/pagination');
 const { assertObjectId } = require('../../utils/validateObjectId');
 const { ApiError } = require('../../utils/apiError');
+const { env } = require('../../config/env');
 
 const Prescription = require('../../models/client/Prescription');
 const Patient = require('../../models/client/Patient');
-const Doctor = require('../../models/client/Doctor');
+const Branch = require('../../models/client/Branch');
+const Tenant = require('../../models/admin/Tenant');
 const { Batch, StockMovement } = require('../../models/client/Inventory');
 const notificationService = require('../../services/notificationService');
+const emailService = require('../../services/emailService');
+const smsService = require('../../services/smsService');
+
+/* ─────────────── LIST ─────────────── */
 
 const list = asyncHandler(async (req, res) => {
   const { page, limit, skip } = parsePagination(req.query);
@@ -30,6 +36,8 @@ const list = asyncHandler(async (req, res) => {
   return paginated(res, items, page, limit, total);
 });
 
+/* ─────────────── GET ─────────────── */
+
 const get = asyncHandler(async (req, res) => {
   assertObjectId(req.params.id, 'prescriptionId');
   const rx = await Prescription.findOne({
@@ -43,6 +51,8 @@ const get = asyncHandler(async (req, res) => {
   if (!rx) throw ApiError.notFound('PRESCRIPTION_NOT_FOUND', 'Prescription not found');
   return ok(res, rx);
 });
+
+/* ─────────────── CREATE ─────────────── */
 
 const create = asyncHandler(async (req, res) => {
   const { patientId, doctorId = null, refNo = null, items, notes = null } = req.body;
@@ -74,6 +84,8 @@ const create = asyncHandler(async (req, res) => {
   return created(res, rx.toObject());
 });
 
+/* ─────────────── UPDATE ─────────────── */
+
 const update = asyncHandler(async (req, res) => {
   assertObjectId(req.params.id, 'prescriptionId');
   const allowed = ['doctorId', 'refNo', 'items', 'notes', 'status'];
@@ -89,6 +101,8 @@ const update = asyncHandler(async (req, res) => {
   if (!rx) throw ApiError.notFound('PRESCRIPTION_NOT_FOUND', 'Prescription not found');
   return ok(res, rx);
 });
+
+/* ─────────────── DISPENSE ─────────────── */
 
 const dispense = asyncHandler(async (req, res) => {
   assertObjectId(req.params.id, 'prescriptionId');
@@ -144,7 +158,10 @@ const dispense = asyncHandler(async (req, res) => {
   await rx.save();
 
   const patient = await Patient.findOne({ __allowGlobal: true, _id: rx.patientId }).lean();
+  const tenant = await Tenant.findById(req.tenantId).select('name').lean();
+  const branch = await Branch.findById(branchId).select('name').lean();
 
+  // In-app notification to branch managers
   notificationService
     .notifyBranchManagers({
       tenantId: req.tenantId,
@@ -156,6 +173,38 @@ const dispense = asyncHandler(async (req, res) => {
       meta: { prescriptionId: String(rx._id), patientName: patient?.name },
     })
     .catch(() => {});
+
+  // Notify the patient
+  if (patient) {
+    const rxRef = rx.refNo || String(rx._id).slice(-6);
+    const pickupUrl = `${env.appUrl}/pending`;
+
+    if (patient.email) {
+      emailService
+        .sendPrescriptionReady({
+          tenantId: req.tenantId,
+          to: patient.email,
+          businessName: tenant?.name || 'PharmaSys',
+          patientName: patient.name,
+          prescriptionRef: rxRef,
+          branchName: branch?.name,
+          pickupUrl,
+        })
+        .catch(() => {});
+    }
+
+    if (patient.phone) {
+      smsService
+        .sendPrescriptionReady({
+          tenantId: req.tenantId,
+          to: patient.phone,
+          patientName: patient.name,
+          prescriptionRef: rxRef,
+          branchName: branch?.name,
+        })
+        .catch(() => {});
+    }
+  }
 
   return ok(res, rx.toObject());
 });
