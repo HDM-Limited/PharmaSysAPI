@@ -1,5 +1,5 @@
 const { asyncHandler } = require('../../utils/asyncHandler');
-const { ok, created, paginated } = require('../../utils/apiResponse');
+const { ok, created, paginated, noContent } = require('../../utils/apiResponse');
 const { parsePagination } = require('../../utils/pagination');
 const { assertObjectId } = require('../../utils/validateObjectId');
 const { ApiError } = require('../../utils/apiError');
@@ -161,7 +161,6 @@ const dispense = asyncHandler(async (req, res) => {
   const tenant = await Tenant.findById(req.tenantId).select('name').lean();
   const branch = await Branch.findById(branchId).select('name').lean();
 
-  // In-app notification to branch managers
   notificationService
     .notifyBranchManagers({
       tenantId: req.tenantId,
@@ -174,7 +173,6 @@ const dispense = asyncHandler(async (req, res) => {
     })
     .catch(() => {});
 
-  // Notify the patient
   if (patient) {
     const rxRef = rx.refNo || String(rx._id).slice(-6);
     const pickupUrl = `${env.appUrl}/pending`;
@@ -209,4 +207,64 @@ const dispense = asyncHandler(async (req, res) => {
   return ok(res, rx.toObject());
 });
 
-module.exports = { list, get, create, update, dispense };
+/* ─────────────── CANCEL (soft state) ─────────────── */
+
+const cancel = asyncHandler(async (req, res) => {
+  assertObjectId(req.params.id, 'prescriptionId');
+  const { reason = null } = req.body;
+
+  const rx = await Prescription.findOne({
+    __allowGlobal: true,
+    _id: req.params.id,
+    tenantId: req.tenantId,
+  });
+  if (!rx) throw ApiError.notFound('PRESCRIPTION_NOT_FOUND', 'Prescription not found');
+  if (rx.status === 'dispensed') {
+    throw ApiError.badRequest('ALREADY_DISPENSED', 'Cannot cancel a dispensed prescription');
+  }
+  if (rx.status === 'cancelled') {
+    throw ApiError.badRequest('ALREADY_CANCELLED', 'Prescription is already cancelled');
+  }
+
+  rx.status = 'cancelled';
+  if (reason) rx.notes = `${rx.notes || ''}\nCancelled: ${reason}`.trim();
+  await rx.save();
+
+  return ok(res, rx.toObject());
+});
+
+/* ─────────────── REMOVE (soft or hard) ─────────────── */
+
+const remove = asyncHandler(async (req, res) => {
+  assertObjectId(req.params.id, 'prescriptionId');
+  const hard = String(req.query.hard) === 'true';
+
+  if (hard && req.user.role !== 'owner') {
+    throw ApiError.forbidden('ONLY_OWNER', 'Only the owner can permanently delete prescriptions');
+  }
+
+  const rx = await Prescription.findOne({
+    __allowGlobal: true,
+    _id: req.params.id,
+    tenantId: req.tenantId,
+  });
+  if (!rx) throw ApiError.notFound('PRESCRIPTION_NOT_FOUND', 'Prescription not found');
+
+  if (hard) {
+    if (rx.status === 'dispensed') {
+      throw ApiError.badRequest(
+        'PRESCRIPTION_DISPENSED',
+        'Cannot permanently delete a dispensed prescription. Cancel or archive instead.'
+      );
+    }
+
+    await Prescription.deleteOne({ _id: rx._id });
+    return ok(res, { deleted: true, permanent: true });
+  }
+
+  rx.status = 'cancelled';
+  await rx.save();
+  return noContent(res);
+});
+
+module.exports = { list, get, create, update, dispense, cancel, remove };

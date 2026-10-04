@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 const { asyncHandler } = require('../../utils/asyncHandler');
-const { ok, created, paginated } = require('../../utils/apiResponse');
+const { ok, created, paginated, noContent } = require('../../utils/apiResponse');
 const { parsePagination } = require('../../utils/pagination');
 const { assertObjectId } = require('../../utils/validateObjectId');
 const { ApiError } = require('../../utils/apiError');
@@ -14,6 +14,10 @@ const { Drug, Batch, StockMovement } = require('../../models/client/Inventory');
 const emailService = require('../../services/emailService');
 const notificationService = require('../../services/notificationService');
 
+/* ═════════════════════════════════════════════════════════════════
+   Helpers
+   ═════════════════════════════════════════════════════════════════ */
+
 function generatePoNo() {
   const now = new Date();
   const y = now.getUTCFullYear();
@@ -23,7 +27,9 @@ function generatePoNo() {
   return `PO-${y}${m}${d}-${rand}`;
 }
 
-/* ─────────────── LIST ─────────────── */
+/* ═════════════════════════════════════════════════════════════════
+   LIST
+   ═════════════════════════════════════════════════════════════════ */
 
 const list = asyncHandler(async (req, res) => {
   const { page, limit, skip } = parsePagination(req.query);
@@ -45,7 +51,9 @@ const list = asyncHandler(async (req, res) => {
   return paginated(res, items, page, limit, total);
 });
 
-/* ─────────────── GET ─────────────── */
+/* ═════════════════════════════════════════════════════════════════
+   GET
+   ═════════════════════════════════════════════════════════════════ */
 
 const get = asyncHandler(async (req, res) => {
   assertObjectId(req.params.id, 'poId');
@@ -60,7 +68,9 @@ const get = asyncHandler(async (req, res) => {
   return ok(res, po);
 });
 
-/* ─────────────── CREATE ─────────────── */
+/* ═════════════════════════════════════════════════════════════════
+   CREATE
+   ═════════════════════════════════════════════════════════════════ */
 
 const create = asyncHandler(async (req, res) => {
   const { supplierId, items, notes = null } = req.body;
@@ -125,7 +135,9 @@ const create = asyncHandler(async (req, res) => {
   return created(res, po.toObject());
 });
 
-/* ─────────────── RECEIVE ─────────────── */
+/* ═════════════════════════════════════════════════════════════════
+   RECEIVE
+   ═════════════════════════════════════════════════════════════════ */
 
 const receive = asyncHandler(async (req, res) => {
   assertObjectId(req.params.id, 'poId');
@@ -187,7 +199,6 @@ const receive = asyncHandler(async (req, res) => {
   po.receivedAt = new Date();
   await po.save();
 
-  // Notify owner + branch managers
   const tenant = await Tenant.findById(req.tenantId).select('name').lean();
   const branch = await Branch.findById(branchId).select('name').lean();
 
@@ -217,7 +228,9 @@ const receive = asyncHandler(async (req, res) => {
   return ok(res, po.toObject());
 });
 
-/* ─────────────── CANCEL ─────────────── */
+/* ═════════════════════════════════════════════════════════════════
+   CANCEL
+   ═════════════════════════════════════════════════════════════════ */
 
 const cancel = asyncHandler(async (req, res) => {
   assertObjectId(req.params.id, 'poId');
@@ -229,7 +242,9 @@ const cancel = asyncHandler(async (req, res) => {
     tenantId: req.tenantId,
   });
   if (!po) throw ApiError.notFound('PO_NOT_FOUND', 'Purchase order not found');
-  if (po.status === 'received') throw ApiError.badRequest('CANNOT_CANCEL_RECEIVED', 'Cannot cancel a received PO');
+  if (po.status === 'received') {
+    throw ApiError.badRequest('CANNOT_CANCEL_RECEIVED', 'Cannot cancel a received PO');
+  }
 
   po.status = 'cancelled';
   po.notes = `${po.notes || ''}\nCancelled: ${reason || 'no reason'}`.trim();
@@ -252,4 +267,51 @@ const cancel = asyncHandler(async (req, res) => {
   return ok(res, po.toObject());
 });
 
-module.exports = { list, get, create, receive, cancel };
+/* ═════════════════════════════════════════════════════════════════
+   REMOVE (soft = cancel, hard = delete)
+   ═════════════════════════════════════════════════════════════════ */
+
+const remove = asyncHandler(async (req, res) => {
+  assertObjectId(req.params.id, 'poId');
+  const hard = String(req.query.hard) === 'true';
+
+  if (hard && req.user.role !== 'owner') {
+    throw ApiError.forbidden('ONLY_OWNER', 'Only the owner can permanently delete purchase orders');
+  }
+
+  const po = await PurchaseOrder.findOne({
+    __allowGlobal: true,
+    _id: req.params.id,
+    tenantId: req.tenantId,
+  });
+  if (!po) throw ApiError.notFound('PO_NOT_FOUND', 'Purchase order not found');
+
+  if (hard) {
+    // Guard: don't hard-delete a received PO — batches and movements reference it
+    if (po.status === 'received') {
+      throw ApiError.badRequest(
+        'PO_RECEIVED',
+        'Cannot permanently delete a received PO. Batches were created from it.'
+      );
+    }
+
+    await PurchaseOrder.deleteOne({ _id: po._id });
+    return ok(res, { deleted: true, permanent: true });
+  }
+
+  // Soft delete = mark cancelled
+  if (po.status !== 'cancelled') {
+    if (po.status === 'received') {
+      throw ApiError.badRequest(
+        'CANNOT_CANCEL_RECEIVED',
+        'Cannot cancel a received PO. Its batches already exist.'
+      );
+    }
+    po.status = 'cancelled';
+    await po.save();
+  }
+
+  return noContent(res);
+});
+
+module.exports = { list, get, create, receive, cancel, remove };

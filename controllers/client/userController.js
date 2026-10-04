@@ -11,8 +11,11 @@ const Branch = require('../../models/client/Branch');
 const UserInvitation = require('../../models/client/UserInvitation');
 const Tenant = require('../../models/admin/Tenant');
 const Plan = require('../../models/admin/Plan');
+const AdminAction = require('../../models/admin/AdminAction');
 const emailService = require('../../services/emailService');
 const smsService = require('../../services/smsService');
+
+/* ─────────────── LIST ─────────────── */
 
 const list = asyncHandler(async (req, res) => {
   if (req.user.role === 'cashier') {
@@ -32,6 +35,8 @@ const list = asyncHandler(async (req, res) => {
 
   return ok(res, items);
 });
+
+/* ─────────────── INVITE ─────────────── */
 
 const invite = asyncHandler(async (req, res) => {
   if (req.user.role === 'cashier') {
@@ -140,15 +145,23 @@ const invite = asyncHandler(async (req, res) => {
   return created(res, { invited: true, user: user.toObject() });
 });
 
+/* ─────────────── UPDATE ─────────────── */
+
 const update = asyncHandler(async (req, res) => {
   assertObjectId(req.params.id, 'userId');
   if (req.user.role === 'cashier') {
     throw ApiError.forbidden('FORBIDDEN', 'Cashiers cannot manage users');
   }
 
-  const target = await User.findOne({ __allowGlobal: true, _id: req.params.id, tenantId: req.tenantId });
+  const target = await User.findOne({
+    __allowGlobal: true,
+    _id: req.params.id,
+    tenantId: req.tenantId,
+  });
   if (!target) throw ApiError.notFound('USER_NOT_FOUND', 'User not found');
-  if (target.role === 'owner') throw ApiError.forbidden('CANNOT_EDIT_OWNER', 'Cannot modify the owner');
+  if (target.role === 'owner') {
+    throw ApiError.forbidden('CANNOT_EDIT_OWNER', 'Cannot modify the owner');
+  }
 
   if (req.user.role === 'branch_manager') {
     if (!req.branchIds.includes(String(target.branchIds?.[0]))) {
@@ -172,20 +185,57 @@ const update = asyncHandler(async (req, res) => {
   return ok(res, updated);
 });
 
+/* ─────────────── REMOVE (soft or hard) ─────────────── */
+
 const remove = asyncHandler(async (req, res) => {
   assertObjectId(req.params.id, 'userId');
   if (req.user.role === 'cashier') {
     throw ApiError.forbidden('FORBIDDEN', 'Cashiers cannot remove users');
   }
 
-  const target = await User.findOne({ __allowGlobal: true, _id: req.params.id, tenantId: req.tenantId });
+  const target = await User.findOne({
+    __allowGlobal: true,
+    _id: req.params.id,
+    tenantId: req.tenantId,
+  });
   if (!target) throw ApiError.notFound('USER_NOT_FOUND', 'User not found');
-  if (target.role === 'owner') throw ApiError.forbidden('CANNOT_REMOVE_OWNER', 'Cannot remove the owner');
+  if (target.role === 'owner') {
+    throw ApiError.forbidden('CANNOT_REMOVE_OWNER', 'Cannot remove the owner');
+  }
   if (String(target._id) === String(req.user._id)) {
     throw ApiError.badRequest('CANNOT_REMOVE_SELF', 'Cannot remove yourself');
   }
-  if (req.user.role === 'branch_manager' && !req.branchIds.includes(String(target.branchIds?.[0]))) {
+  if (
+    req.user.role === 'branch_manager' &&
+    !req.branchIds.includes(String(target.branchIds?.[0]))
+  ) {
     throw ApiError.forbidden('FORBIDDEN', 'You can only remove staff in your branch');
+  }
+
+  const hard = String(req.query.hard) === 'true';
+
+  if (hard) {
+    if (req.user.role !== 'owner') {
+      throw ApiError.forbidden('ONLY_OWNER', 'Only the owner can permanently delete staff');
+    }
+
+    await UserInvitation.deleteMany({ userId: target._id });
+    await User.deleteOne({ _id: target._id });
+
+    await AdminAction.create({
+      adminId: req.user._id,
+      tenantId: req.tenantId,
+      action: 'user.delete_hard',
+      metadata: {
+        userId: String(target._id),
+        email: target.email,
+        role: target.role,
+        fullName: target.fullName,
+      },
+      ip: req.ip,
+    }).catch(() => {});
+
+    return ok(res, { deleted: true, permanent: true });
   }
 
   target.status = 'suspended';
