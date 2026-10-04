@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const { asyncHandler } = require('../../utils/asyncHandler');
 const { ok, created } = require('../../utils/apiResponse');
 const { ApiError } = require('../../utils/apiError');
@@ -11,7 +12,11 @@ const Payment = require('../../models/client/Payment');
 const emailService = require('../../services/emailService');
 const smsService = require('../../services/smsService');
 const mpesaService = require('../../services/mpesaService');
+const paymentInstructionsService = require('../../services/paymentInstructionsService');
 const { mpesaConfig } = require('../../config/mpesa');
+const { env } = require('../../config/env');
+
+/* ─────────────── helpers ─────────────── */
 
 function computePeriodEnd(cycle, from = new Date()) {
   if (cycle === 'once') return null;
@@ -24,9 +29,11 @@ function generateInvoiceNumber(prefix = 'INV') {
   const y = now.getUTCFullYear();
   const m = String(now.getUTCMonth() + 1).padStart(2, '0');
   const d = String(now.getUTCDate()).padStart(2, '0');
-  const rand = require('crypto').randomBytes(3).toString('hex').toUpperCase();
+  const rand = crypto.randomBytes(3).toString('hex').toUpperCase();
   return `${prefix}-${y}${m}${d}-${rand}`;
 }
+
+/* ─────────────── STATUS ─────────────── */
 
 const status = asyncHandler(async (req, res) => {
   const tenant = await Tenant.findById(req.tenantId).select('planCode status expiresAt').lean();
@@ -56,6 +63,8 @@ const status = asyncHandler(async (req, res) => {
   });
 });
 
+/* ─────────────── RENEW ─────────────── */
+
 const renew = asyncHandler(async (req, res) => {
   if (req.user.role !== 'owner') {
     throw ApiError.forbidden('ONLY_OWNER', 'Only the owner can renew the subscription');
@@ -70,20 +79,26 @@ const renew = asyncHandler(async (req, res) => {
   const tenant = await Tenant.findById(req.tenantId).select('name planCode').lean();
   if (!tenant) throw ApiError.notFound('TENANT_NOT_FOUND', 'Tenant not found');
 
-  const owner = req.user;
-
   const cycle = plan.price?.interval || 'month';
   const currency = plan.price?.currency || 'KES';
   const amount = plan.price?.amount || 0;
   const dueDate = new Date(Date.now() + 3 * 3600 * 1000);
+  const invoiceNumber = generateInvoiceNumber('REN');
+
+  // Build payment instructions from enabled methods
+  const instructions = await paymentInstructionsService.getPaymentInstructions({
+    amount,
+    currency,
+    invoiceNumber,
+  });
 
   const invoice = await Invoice.create({
     tenantId: req.tenantId,
-    invoiceNumber: generateInvoiceNumber('REN'),
+    invoiceNumber,
     customerSnapshot: {
-      name: owner.fullName,
-      email: owner.email,
-      phone: owner.phone || null,
+      name: req.user.fullName,
+      email: req.user.email,
+      phone: req.user.phone || null,
       address: null,
     },
     items: [
@@ -108,16 +123,17 @@ const renew = asyncHandler(async (req, res) => {
     issuedAt: new Date(),
     sentAt: new Date(),
     notes: 'Renewal invoice. Payment due within 3 hours.',
+    paymentInstructions: instructions,
     createdBy: req.user._id,
   });
 
-  if (owner.email) {
+  if (req.user.email) {
     emailService
       .sendInvoice({
         tenantId: req.tenantId,
-        to: owner.email,
+        to: req.user.email,
         businessName: tenant.name,
-        customerName: owner.fullName,
+        customerName: req.user.fullName,
         invoiceNumber: invoice.invoiceNumber,
         items: invoice.items,
         subtotal: invoice.subtotal,
@@ -129,8 +145,8 @@ const renew = asyncHandler(async (req, res) => {
         dueDate: invoice.dueDate.toISOString(),
         issuedAt: invoice.issuedAt.toISOString(),
         notes: invoice.notes,
-        instructions: invoice.paymentInstructions,
-        payUrl: `${process.env.APP_URL}/invoice/${invoice.invoiceNumber}`,
+        instructions: instructions,
+        payUrl: `${env.appUrl}/invoice/${invoice.invoiceNumber}`,
       })
       .catch(() => {});
   }
@@ -146,12 +162,18 @@ const renew = asyncHandler(async (req, res) => {
   });
 });
 
+/* ─────────────── INVOICE (read latest) ─────────────── */
+
 const invoice = asyncHandler(async (req, res) => {
-  const latest = await Invoice.findOne({ tenantId: req.tenantId }).sort({ createdAt: -1 }).lean();
+  const latest = await Invoice.findOne({ __allowGlobal: true, tenantId: req.tenantId })
+    .sort({ createdAt: -1 })
+    .lean();
+
   if (!latest) return ok(res, null);
 
   return ok(res, {
     invoiceNumber: latest.invoiceNumber,
+    customerSnapshot: latest.customerSnapshot,
     items: latest.items,
     subtotal: latest.subtotal,
     discount: latest.discount,
@@ -168,6 +190,8 @@ const invoice = asyncHandler(async (req, res) => {
   });
 });
 
+/* ─────────────── STK PUSH ─────────────── */
+
 const stkPush = asyncHandler(async (req, res) => {
   const { phone } = req.body;
   if (!phone) throw ApiError.badRequest('MISSING_PHONE', 'phone required');
@@ -176,9 +200,12 @@ const stkPush = asyncHandler(async (req, res) => {
     throw ApiError.unavailable('MPESA_NOT_CONFIGURED', 'M-Pesa is not configured');
   }
 
-  const invoiceDoc = await Invoice.findOne({ tenantId: req.tenantId }).sort({ createdAt: -1 });
+  const invoiceDoc = await Invoice.findOne({ __allowGlobal: true, tenantId: req.tenantId })
+    .sort({ createdAt: -1 });
   if (!invoiceDoc) throw ApiError.notFound('INVOICE_NOT_FOUND', 'No invoice to pay');
-  if (invoiceDoc.status === 'paid') throw ApiError.badRequest('ALREADY_PAID', 'Invoice already paid');
+  if (invoiceDoc.status === 'paid') {
+    throw ApiError.badRequest('ALREADY_PAID', 'Invoice already paid');
+  }
 
   const stk = await mpesaService.initiateStkPush({
     phone,
@@ -188,7 +215,7 @@ const stkPush = asyncHandler(async (req, res) => {
   });
 
   await Invoice.updateOne(
-    { _id: invoiceDoc._id },
+    { __allowGlobal: true, _id: invoiceDoc._id },
     {
       $set: {
         stkLastRequest: {
@@ -202,7 +229,7 @@ const stkPush = asyncHandler(async (req, res) => {
 
   await Payment.create({
     tenantId: req.tenantId,
-    purpose: 'subscription',
+    purpose: 'invoice',
     invoiceId: invoiceDoc._id,
     method: 'mpesa_stk',
     amount: invoiceDoc.amountDue,

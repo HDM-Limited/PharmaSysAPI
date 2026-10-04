@@ -4,8 +4,13 @@ const { ApiError } = require('../../utils/apiError');
 const Invoice = require('../../models/client/Invoice');
 
 const getByNumber = asyncHandler(async (req, res) => {
-  const invoice = await Invoice.findOne({ invoiceNumber: req.params.number })
-    .select('invoiceNumber customerSnapshot items subtotal discount tax total amountPaid amountDue currency status issuedAt dueDate notes paymentInstructions')
+  const invoice = await Invoice.findOne({
+    __allowGlobal: true,
+    invoiceNumber: req.params.number,
+  })
+    .select(
+      'invoiceNumber customerSnapshot items subtotal discount tax total amountPaid amountDue currency status issuedAt dueDate notes paymentInstructions'
+    )
     .lean();
 
   if (!invoice) throw ApiError.notFound('INVOICE_NOT_FOUND', 'Invoice not found');

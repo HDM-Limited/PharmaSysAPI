@@ -5,7 +5,13 @@ const authenticateTenant = require('../../middleware/client/authenticateTenant')
 const resolveBranchContext = require('../../middleware/client/resolveBranchContext');
 const requireScope = require('../../middleware/client/requireScope');
 
+// All /app/* routes require auth
 router.use(authenticateTenant);
+
+// Billing — available to any authenticated tenant (pending or active)
+router.use('/billing', require('./billingRoutes'));
+
+// Everything below requires scope=active
 router.use(resolveBranchContext);
 router.use(requireScope('active'));
 
@@ -23,7 +29,6 @@ router.use('/reports', require('./reportRoutes'));
 router.use('/settings', require('./settingsRoutes'));
 router.use('/notifications', require('./notificationRoutes'));
 router.use('/ai', require('./aiRoutes'));
-router.use('/billing', require('./billingRoutes'));
 router.use('/uploads', require('./uploadRoutes'));
 
 module.exports = router;
