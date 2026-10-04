@@ -1,27 +1,46 @@
-const { startWorkers, stopWorkers } = require('./workers');
-const subscriptionScheduler = require('./subscriptionScheduler');
-const inventoryScheduler = require('./inventoryScheduler');
-const notificationScheduler = require('./notificationScheduler');
-const aiScheduler = require('./aiScheduler');
-const maintenanceScheduler = require('./maintenanceScheduler');
 const { logger } = require('../utils/logger');
 
+const aiInsights = require('./aiInsights');
+const autoBackup = require('./autoBackup');
+const dailyMetrics = require('./dailyMetrics');
+const lowStockAlerts = require('./lowStockAlerts');
+const overdueInvoices = require('./overdueInvoices');
+const pendingExpiry = require('./pendingExpiry');
+
+const SCHEDULERS = [
+  aiInsights,
+  autoBackup,
+  dailyMetrics,
+  lowStockAlerts,
+  overdueInvoices,
+  pendingExpiry,
+];
+
 function startSchedulers() {
-  try {
-    subscriptionScheduler.start();
-    inventoryScheduler.start();
-    notificationScheduler.start();
-    aiScheduler.start();
-    maintenanceScheduler.start();
-    startWorkers();
-    logger.info('schedulers + workers started');
-  } catch (err) {
-    logger.error({ err: err.message }, 'schedulers failed to start');
+  if (process.env.SCHEDULERS_ENABLED === 'false') {
+    logger.warn('schedulers disabled via SCHEDULERS_ENABLED=false');
+    return;
   }
+
+  for (const scheduler of SCHEDULERS) {
+    try {
+      scheduler.start();
+    } catch (err) {
+      logger.error({ err: err.message, scheduler: scheduler.name }, 'scheduler failed to start');
+    }
+  }
+
+  logger.info('schedulers started');
 }
 
-async function stopSchedulers() {
-  await stopWorkers();
+function stopSchedulers() {
+  for (const scheduler of SCHEDULERS) {
+    try {
+      scheduler.stop?.();
+    } catch (err) {
+      logger.warn({ err: err.message, scheduler: scheduler.name }, 'scheduler stop failed');
+    }
+  }
 }
 
 module.exports = { startSchedulers, stopSchedulers };

@@ -5,23 +5,29 @@ const { logger } = require('../utils/logger');
 let redis = null;
 let redisSub = null;
 
+function buildOptions() {
+  const url = env.redisUrl;
+  const isTls = url.startsWith('rediss://');
+  return {
+    maxRetriesPerRequest: null,
+    enableReadyCheck: true,
+    lazyConnect: false,
+    ...(isTls ? { tls: {} } : {}),
+  };
+}
+
 async function connectRedis() {
   if (!env.redisEnabled) {
     logger.warn('redis disabled');
     return null;
   }
-
   if (redis) return redis;
 
-  redis = new Redis(env.redisUrl, {
-    maxRetriesPerRequest: null,
-    enableReadyCheck: true,
-    lazyConnect: false,
-  });
-
+  redis = new Redis(env.redisUrl, buildOptions());
   redisSub = redis.duplicate();
 
   redis.on('connect', () => logger.info('redis connected'));
+  redis.on('ready', () => logger.info('redis ready'));
   redis.on('error', (e) => logger.error({ err: e.message }, 'redis error'));
 
   return redis;
@@ -38,9 +44,14 @@ function getRedis() {
   return redis;
 }
 
-function redisConnection() {
-  if (!env.redisEnabled) return null;
-  return { url: env.redisUrl, maxRetriesPerRequest: null };
+function bullConnection() {
+  if (!env.redisEnabled || !redis) return null;
+  return redis;
 }
 
-module.exports = { connectRedis, disconnectRedis, getRedis, redisConnection };
+module.exports = {
+  connectRedis,
+  disconnectRedis,
+  getRedis,
+  bullConnection,
+};
