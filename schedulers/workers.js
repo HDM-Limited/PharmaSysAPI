@@ -17,7 +17,13 @@ function startWorkers() {
     return [];
   }
 
-  const opts = { connection, concurrency: 3 };
+  const defaultOpts = { connection, concurrency: 3 };
+  const criticalOpts = {
+    connection,
+    concurrency: 1,
+    attempts: 3,
+    backoff: { type: 'exponential', delay: 5000 },
+  };
 
   workers = [
     new Worker('inventory', async (job) => {
@@ -28,7 +34,7 @@ function startWorkers() {
         case 'expired-batch-sweep': return runExpiredBatchSweep();
         default: return null;
       }
-    }, opts),
+    }, defaultOpts),
 
     new Worker('notifications', async (job) => {
       switch (job.name) {
@@ -39,7 +45,7 @@ function startWorkers() {
         case 'refill-reminder': return runRefillReminder();
         default: return null;
       }
-    }, opts),
+    }, defaultOpts),
 
     new Worker('ai', async (job) => {
       switch (job.name) {
@@ -48,8 +54,9 @@ function startWorkers() {
         case 'expiry-risk': return runExpiryRisk();
         default: return null;
       }
-    }, opts),
+    }, defaultOpts),
 
+    // ── Strict: lifecycle retries + single concurrency ──
     new Worker('lifecycle', async (job) => {
       switch (job.name) {
         case 'expiring': return runSubscriptionExpiring();
@@ -57,14 +64,14 @@ function startWorkers() {
         case 'past-due': return runSubscriptionPastDue();
         default: return null;
       }
-    }, opts),
+    }, criticalOpts),
 
     new Worker('webhooks', async (job) => {
       switch (job.name) {
         case 'retry': return runRetryWebhooks();
         default: return null;
       }
-    }, opts),
+    }, { ...defaultOpts, attempts: 5, backoff: { type: 'exponential', delay: 2000 } }),
 
     new Worker('cleanup', async (job) => {
       switch (job.name) {
@@ -72,7 +79,7 @@ function startWorkers() {
         case 'notifications': return runCleanupNotifications();
         default: return null;
       }
-    }, opts),
+    }, defaultOpts),
 
     new Worker('backups', async (job) => {
       switch (job.name) {
@@ -80,17 +87,23 @@ function startWorkers() {
         case 'prune': return runBackupRetention();
         default: return null;
       }
-    }, opts),
+    }, { ...defaultOpts, concurrency: 1, attempts: 2 }),
 
-    new Worker('reports', async () => null, opts),
+    new Worker('reports', async () => null, defaultOpts),
   ];
 
   workers.forEach((w) => {
     w.on('failed', (job, err) => {
-      logger.error({ queue: w.name, job: job?.name, err: err?.message }, 'worker job failed');
+      logger.error(
+        { queue: w.name, job: job?.name, attempts: job?.attemptsMade, err: err?.message },
+        'worker job failed'
+      );
     });
     w.on('completed', (job) => {
       logger.info({ queue: w.name, job: job?.name }, 'worker job completed');
+    });
+    w.on('error', (err) => {
+      logger.error({ queue: w.name, err: err.message }, 'worker error');
     });
   });
 

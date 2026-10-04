@@ -35,9 +35,31 @@ async function authenticateTenant(req, _res, next) {
     if (!tenant) {
       throw ApiError.unauthorized('TENANT_NOT_FOUND', 'Tenant not found');
     }
+
     if (['rejected', 'suspended', 'expired'].includes(tenant.status)) {
       throw ApiError.forbidden('TENANT_BLOCKED', `Tenant ${tenant.status}`);
     }
+
+    // ── STRICT EXPIRY GATE ──
+    // Even if the scheduler hasn't run, block access past expiresAt.
+    if (tenant.expiresAt && new Date(tenant.expiresAt).getTime() < Date.now()) {
+      // Lazily mark tenant + subscription as expired so subsequent requests don't re-check.
+      Tenant.updateOne(
+        { _id: tenant._id, status: 'active' },
+        { $set: { status: 'expired' } }
+      ).catch(() => {});
+      const Subscription = require('../../models/admin/Subscription');
+      Subscription.updateOne(
+        { tenantId: tenant._id, status: 'active' },
+        { $set: { status: 'expired' } }
+      ).catch(() => {});
+
+      throw ApiError.forbidden(
+        'SUBSCRIPTION_EXPIRED',
+        'Your subscription has expired. Renew to continue.'
+      );
+    }
+    // ────────────────────────
 
     const user = await User.findOne({ __allowGlobal: true, _id: payload.sub }).lean();
     if (!user) {
