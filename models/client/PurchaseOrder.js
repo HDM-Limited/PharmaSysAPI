@@ -28,6 +28,8 @@ const schema = new mongoose.Schema(
     total: { type: Number, default: 0 },
     notes: { type: String, default: null },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    sentAt: { type: Date, default: null },
+    sentBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     receivedAt: { type: Date, default: null },
   },
   { timestamps: true }

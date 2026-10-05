@@ -3,6 +3,7 @@ const { ok, created, noContent, paginated } = require('../../utils/apiResponse')
 const { parsePagination } = require('../../utils/pagination');
 const { assertObjectId } = require('../../utils/validateObjectId');
 const { ApiError } = require('../../utils/apiError');
+const { toObjectId } = require('../../utils/objectId');
 
 const { Drug, Batch, StockMovement } = require('../../models/client/Inventory');
 const Tenant = require('../../models/admin/Tenant');
@@ -33,17 +34,53 @@ const listDrugs = asyncHandler(async (req, res) => {
     Drug.countDocuments({ __allowGlobal: true, ...filter }),
   ]);
 
-  // Enrich each drug with total stock across batches
+  // Enrich with stock + last selling/cost price per drug
   let enriched = items;
   if (items.length) {
     const drugIds = items.map((d) => d._id);
-    const branchFilter = req.branchId ? { branchId: req.branchId } : {};
-    const agg = await Batch.aggregate([
-      { $match: { tenantId: req.tenantId, drugId: { $in: drugIds }, ...branchFilter } },
-      { $group: { _id: '$drugId', qty: { $sum: '$qty' } } },
+    const tenantObjId = toObjectId(req.tenantId);
+    const branchObjId = req.branchId ? toObjectId(req.branchId) : null;
+    const branchFilter = branchObjId ? { branchId: branchObjId } : {};
+
+    const [branchAgg, totalAgg] = await Promise.all([
+      Batch.aggregate([
+        {
+          $match: {
+            tenantId: tenantObjId,
+            drugId: { $in: drugIds },
+            ...branchFilter,
+          },
+        },
+        { $sort: { createdAt: -1 } },
+        {
+          $group: {
+            _id: '$drugId',
+            qty: { $sum: '$qty' },
+            lastSellingPrice: { $first: '$sellingPrice' },
+            lastCostPrice: { $first: '$costPrice' },
+          },
+        },
+      ]),
+      Batch.aggregate([
+        { $match: { tenantId: tenantObjId, drugId: { $in: drugIds } } },
+        { $group: { _id: '$drugId', qty: { $sum: '$qty' } } },
+      ]),
     ]);
-    const qtyMap = Object.fromEntries(agg.map((r) => [String(r._id), r.qty]));
-    enriched = items.map((d) => ({ ...d, currentQty: qtyMap[String(d._id)] || 0 }));
+
+    const branchStats = Object.fromEntries(branchAgg.map((r) => [String(r._id), r]));
+    const totalStats = Object.fromEntries(totalAgg.map((r) => [String(r._id), r]));
+
+    enriched = items.map((d) => {
+      const b = branchStats[String(d._id)];
+      const t = totalStats[String(d._id)];
+      return {
+        ...d,
+        currentQty: b?.qty ?? 0,
+        totalQtyAllBranches: t?.qty ?? 0,
+        lastSellingPrice: b?.lastSellingPrice ?? 0,
+        lastCostPrice: b?.lastCostPrice ?? 0,
+      };
+    });
   }
 
   return paginated(res, enriched, page, limit, total);
@@ -162,21 +199,11 @@ const addBatch = asyncHandler(async (req, res) => {
     supplierId = null,
   } = req.body;
 
-  if (!Number.isFinite(qty) || qty <= 0) {
-    throw ApiError.badRequest('INVALID_QTY', 'qty must be > 0');
-  }
-  if (!expiryDate) {
-    throw ApiError.badRequest('MISSING_EXPIRY', 'expiryDate required');
-  }
-  if (new Date(expiryDate) <= new Date()) {
-    throw ApiError.badRequest('EXPIRED_DATE', 'expiryDate must be in the future');
-  }
+  if (!Number.isFinite(qty) || qty <= 0) throw ApiError.badRequest('INVALID_QTY', 'qty must be > 0');
+  if (!expiryDate) throw ApiError.badRequest('MISSING_EXPIRY', 'expiryDate required');
+  if (new Date(expiryDate) <= new Date()) throw ApiError.badRequest('EXPIRED_DATE', 'expiryDate must be in the future');
 
-  const drug = await Drug.findOne({
-    __allowGlobal: true,
-    _id: req.params.id,
-    tenantId: req.tenantId,
-  }).lean();
+  const drug = await Drug.findOne({ __allowGlobal: true, _id: req.params.id, tenantId: req.tenantId }).lean();
   if (!drug) throw ApiError.notFound('DRUG_NOT_FOUND', 'Drug not found');
 
   const branchId = req.branchId || req.branchIds[0];
@@ -187,12 +214,8 @@ const addBatch = asyncHandler(async (req, res) => {
   let resolvedSell = sellingPrice;
 
   if (
-    resolvedCost === undefined ||
-    resolvedCost === null ||
-    resolvedCost === '' ||
-    resolvedSell === undefined ||
-    resolvedSell === null ||
-    resolvedSell === ''
+    resolvedCost === undefined || resolvedCost === null || resolvedCost === '' ||
+    resolvedSell === undefined || resolvedSell === null || resolvedSell === ''
   ) {
     const last = await Batch.findOne({
       __allowGlobal: true,
@@ -268,7 +291,6 @@ const updateBatch = asyncHandler(async (req, res) => {
 
 const removeBatch = asyncHandler(async (req, res) => {
   assertObjectId(req.params.id, 'batchId');
-  // `hard` is accepted for API symmetry — batches only ever hard-delete.
   const batch = await Batch.findOne({
     __allowGlobal: true,
     _id: req.params.id,
@@ -331,7 +353,10 @@ const listMovements = asyncHandler(async (req, res) => {
 });
 
 const lowStock = asyncHandler(async (req, res) => {
-  const branchFilter = req.branchId ? { branchId: req.branchId } : {};
+  const tenantObjId = toObjectId(req.tenantId);
+  const branchObjId = req.branchId ? toObjectId(req.branchId) : null;
+  const branchFilter = branchObjId ? { branchId: branchObjId } : {};
+
   const drugs = await Drug.find({
     __allowGlobal: true,
     tenantId: req.tenantId,
@@ -341,7 +366,7 @@ const lowStock = asyncHandler(async (req, res) => {
   if (!drugs.length) return ok(res, []);
 
   const agg = await Batch.aggregate([
-    { $match: { tenantId: req.tenantId, ...branchFilter } },
+    { $match: { tenantId: tenantObjId, ...branchFilter } },
     { $group: { _id: '$drugId', qty: { $sum: '$qty' } } },
   ]);
   const qtyByDrug = Object.fromEntries(agg.map((r) => [String(r._id), r.qty]));

@@ -14,6 +14,10 @@ const Tenant = require('../../models/admin/Tenant');
 const Plan = require('../../models/admin/Plan');
 const notificationService = require('../../services/notificationService');
 
+/* ═════════════════════════════════════════════════════════════════
+   Helpers
+   ═════════════════════════════════════════════════════════════════ */
+
 async function pickBatchFEFO(tenantId, branchId, drugId, requiredQty) {
   const batches = await Batch.find({
     __allowGlobal: true,
@@ -42,8 +46,20 @@ async function pickBatchFEFO(tenantId, branchId, drugId, requiredQty) {
   return picked;
 }
 
+/* ═════════════════════════════════════════════════════════════════
+   CREATE
+   ═════════════════════════════════════════════════════════════════ */
+
 const create = asyncHandler(async (req, res) => {
-  const { items, customerId = null, patientId = null, prescriptionId = null, paymentMethod = 'cash', discount = 0, note = null } = req.body;
+  const {
+    items,
+    customerId = null,
+    patientId = null,
+    prescriptionId = null,
+    paymentMethod = 'cash',
+    discount = 0,
+    note = null,
+  } = req.body;
 
   if (!Array.isArray(items) || !items.length) {
     throw ApiError.badRequest('EMPTY_SALE', 'At least one item is required');
@@ -68,7 +84,10 @@ const create = asyncHandler(async (req, res) => {
       status: { $ne: 'voided' },
     });
     if (count >= monthlyLimit) {
-      throw ApiError.badRequest('LIMIT_TRANSACTIONS', `Plan allows ${monthlyLimit} transactions per month`);
+      throw ApiError.badRequest(
+        'LIMIT_TRANSACTIONS',
+        `Plan allows ${monthlyLimit} transactions per month`
+      );
     }
   }
 
@@ -146,7 +165,7 @@ const create = asyncHandler(async (req, res) => {
     returns: [],
   });
 
-  // Decrement batches + log movements
+  /* Decrement batches + log movements */
   for (const r of resolved) {
     for (const p of r.picks) {
       await Batch.updateOne(
@@ -180,11 +199,16 @@ const create = asyncHandler(async (req, res) => {
   if (prescriptionId) {
     await Prescription.updateOne(
       { __allowGlobal: true, _id: prescriptionId, tenantId: req.tenantId },
-      { $set: { status: 'dispensed', dispensedBy: req.user._id, dispensedAt: new Date() } }
+      {
+        $set: {
+          status: 'dispensed',
+          dispensedBy: req.user._id,
+          dispensedAt: new Date(),
+        },
+      }
     );
   }
 
-  // In-app notification to branch managers
   notificationService
     .notifyBranchManagers({
       tenantId: req.tenantId,
@@ -197,8 +221,20 @@ const create = asyncHandler(async (req, res) => {
     })
     .catch(() => {});
 
-  return created(res, sale.toObject());
+  /* Return with all references populated so the client can print a full receipt */
+  const populated = await Sale.findById(sale._id)
+    .populate('customerId', 'name phone email')
+    .populate('patientId', 'name phone')
+    .populate('cashierId', 'fullName email')
+    .populate('branchId', 'name code address phone')
+    .lean();
+
+  return created(res, populated || sale.toObject());
 });
+
+/* ═════════════════════════════════════════════════════════════════
+   LIST
+   ═════════════════════════════════════════════════════════════════ */
 
 const list = asyncHandler(async (req, res) => {
   const { page, limit, skip } = parsePagination(req.query);
@@ -215,6 +251,9 @@ const list = asyncHandler(async (req, res) => {
 
   const [items, total] = await Promise.all([
     Sale.find({ __allowGlobal: true, ...filter })
+      .populate('customerId', 'name')
+      .populate('patientId', 'name')
+      .populate('cashierId', 'fullName')
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
@@ -225,16 +264,29 @@ const list = asyncHandler(async (req, res) => {
   return paginated(res, items, page, limit, total);
 });
 
+/* ═════════════════════════════════════════════════════════════════
+   GET
+   ═════════════════════════════════════════════════════════════════ */
+
 const get = asyncHandler(async (req, res) => {
   assertObjectId(req.params.id, 'saleId');
   const sale = await Sale.findOne({
     __allowGlobal: true,
     _id: req.params.id,
     tenantId: req.tenantId,
-  }).lean();
+  })
+    .populate('customerId', 'name phone email')
+    .populate('patientId', 'name phone')
+    .populate('cashierId', 'fullName email')
+    .populate('branchId', 'name code address phone')
+    .lean();
   if (!sale) throw ApiError.notFound('SALE_NOT_FOUND', 'Sale not found');
   return ok(res, sale);
 });
+
+/* ═════════════════════════════════════════════════════════════════
+   REFUND
+   ═════════════════════════════════════════════════════════════════ */
 
 const refund = asyncHandler(async (req, res) => {
   assertObjectId(req.params.id, 'saleId');
@@ -277,7 +329,6 @@ const refund = asyncHandler(async (req, res) => {
       refundAmount,
     });
 
-    // Return stock to batch
     await Batch.updateOne(
       { __allowGlobal: true, _id: saleItem.batchId },
       { $inc: { qty } }
@@ -318,6 +369,10 @@ const refund = asyncHandler(async (req, res) => {
 
   return ok(res, sale.toObject());
 });
+
+/* ═════════════════════════════════════════════════════════════════
+   RECEIPT
+   ═════════════════════════════════════════════════════════════════ */
 
 const receipt = asyncHandler(async (req, res) => {
   assertObjectId(req.params.id, 'saleId');

@@ -70,6 +70,22 @@ function buildSessionPayload(user, tenant) {
   };
 }
 
+/**
+ * Shaped tenant object returned to the client.
+ * Includes settings so the receipt brand (logo, address, receipt text)
+ * is available without a second request.
+ */
+function shapeTenant(tenant) {
+  return {
+    id: tenant._id,
+    name: tenant.name,
+    slug: tenant.slug,
+    status: tenant.status,
+    planCode: tenant.planCode,
+    settings: tenant.settings || {},
+  };
+}
+
 /* ─────────────── REGISTER ─────────────── */
 
 const register = asyncHandler(async (req, res) => {
@@ -93,7 +109,10 @@ const register = asyncHandler(async (req, res) => {
     throw ApiError.badRequest('WEAK_PASSWORD', 'Password must be at least 8 characters');
   }
 
-  const existing = await User.findOne({ __allowGlobal: true, email: email.toLowerCase() }).lean();
+  const existing = await User.findOne({
+    __allowGlobal: true,
+    email: email.toLowerCase(),
+  }).lean();
   if (existing) throw ApiError.conflict('EMAIL_TAKEN', 'Email already registered');
 
   const plan = await Plan.findOne({ code: planCode, isActive: true, isPublic: true }).lean();
@@ -111,6 +130,7 @@ const register = asyncHandler(async (req, res) => {
     status: 'pending_user',
     planCode: plan.code,
     registeredAt: now,
+    settings: {},
   });
 
   const branch = await Branch.create({
@@ -248,13 +268,7 @@ const register = asyncHandler(async (req, res) => {
       status: owner.status,
       branchIds: owner.branchIds,
     },
-    tenant: {
-      id: tenant._id,
-      name: tenant.name,
-      slug: tenant.slug,
-      status: tenant.status,
-      planCode: tenant.planCode,
-    },
+    tenant: shapeTenant(tenant),
     plan: {
       code: plan.code,
       name: plan.name,
@@ -332,13 +346,7 @@ const login = asyncHandler(async (req, res) => {
       branchIds: user.branchIds,
       mustChangePassword: user.mustChangePassword,
     },
-    tenant: {
-      id: tenant._id,
-      name: tenant.name,
-      slug: tenant.slug,
-      status: tenant.status,
-      planCode: tenant.planCode,
-    },
+    tenant: shapeTenant(tenant),
     plan: plan
       ? { code: plan.code, name: plan.name, limits: plan.limits, features: plan.features }
       : null,
@@ -410,13 +418,7 @@ const me = asyncHandler(async (req, res) => {
       branchIds: user.branchIds,
       mustChangePassword: user.mustChangePassword,
     },
-    tenant: {
-      id: tenant._id,
-      name: tenant.name,
-      slug: tenant.slug,
-      status: tenant.status,
-      planCode: tenant.planCode,
-    },
+    tenant: shapeTenant(tenant),
     plan: plan
       ? { code: plan.code, name: plan.name, limits: plan.limits, features: plan.features }
       : null,
@@ -486,6 +488,54 @@ const resetPassword = asyncHandler(async (req, res) => {
   return ok(res, { reset: true });
 });
 
+/* ─────────────── CHANGE PASSWORD (self) ─────────────── */
+
+const changePassword = asyncHandler(async (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+
+  if (!currentPassword || !newPassword) {
+    throw ApiError.badRequest(
+      'MISSING_FIELDS',
+      'currentPassword and newPassword required'
+    );
+  }
+  if (newPassword.length < 8) {
+    throw ApiError.badRequest('WEAK_PASSWORD', 'New password must be at least 8 characters');
+  }
+  if (currentPassword === newPassword) {
+    throw ApiError.badRequest('SAME_PASSWORD', 'New password must be different');
+  }
+
+  const user = await User.findOne({
+    __allowGlobal: true,
+    _id: req.user._id,
+    tenantId: req.tenantId,
+  }).select('+passwordHash');
+
+  if (!user) throw ApiError.notFound('USER_NOT_FOUND', 'User not found');
+
+  const valid = await comparePassword(currentPassword, user.passwordHash);
+  if (!valid) {
+    throw ApiError.badRequest('INVALID_PASSWORD', 'Current password is incorrect');
+  }
+
+  user.passwordHash = await hashPassword(newPassword);
+  user.mustChangePassword = false;
+  await user.save();
+
+  emailService
+    .sendPasswordChanged({
+      tenantId: req.tenantId,
+      to: user.email,
+      fullName: user.fullName,
+      when: new Date().toISOString(),
+      ip: req.ip,
+    })
+    .catch(() => {});
+
+  return ok(res, { changed: true });
+});
+
 /* ─────────────── ACCEPT INVITE ─────────────── */
 
 const acceptInvite = asyncHandler(async (req, res) => {
@@ -520,12 +570,7 @@ const acceptInvite = asyncHandler(async (req, res) => {
     accessToken: signAccessToken(payload, 'tenant'),
     refreshToken: signRefreshToken(payload, 'tenant').token,
     user: { id: user._id, email: user.email, role: user.role },
-    tenant: {
-      id: tenant._id,
-      name: tenant.name,
-      status: tenant.status,
-      planCode: tenant.planCode,
-    },
+    tenant: shapeTenant(tenant),
     scope: payload.scope,
   });
 });
@@ -562,18 +607,15 @@ const impersonateExchange = asyncHandler(async (req, res) => {
     accessToken: signAccessToken(payload, 'tenant'),
     refreshToken: signRefreshToken(payload, 'tenant').token,
     user: { id: user._id, email: user.email, role: user.role },
-    tenant: {
-      id: tenant._id,
-      name: tenant.name,
-      status: tenant.status,
-      planCode: tenant.planCode,
-    },
+    tenant: shapeTenant(tenant),
     scope: payload.scope,
     impersonatedBy: decoded.impersonatedBy,
   });
 });
 
-module.exports = {
+/* ─────────────── EXPORTS ─────────────── */
+
+const exported = {
   register,
   login,
   refresh,
@@ -581,6 +623,15 @@ module.exports = {
   me,
   forgotPassword,
   resetPassword,
+  changePassword,
   acceptInvite,
   impersonateExchange,
 };
+
+for (const [name, fn] of Object.entries(exported)) {
+  if (typeof fn !== 'function') {
+    throw new Error(`authController: export "${name}" is not a function`);
+  }
+}
+
+module.exports = exported;

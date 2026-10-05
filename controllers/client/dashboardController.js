@@ -1,5 +1,6 @@
 const { asyncHandler } = require('../../utils/asyncHandler');
 const { ok } = require('../../utils/apiResponse');
+const { toObjectId } = require('../../utils/objectId');
 const Sale = require('../../models/client/Sale');
 const { Drug, Batch } = require('../../models/client/Inventory');
 const Patient = require('../../models/client/Patient');
@@ -7,14 +8,20 @@ const Tenant = require('../../models/admin/Tenant');
 const Plan = require('../../models/admin/Plan');
 const aiService = require('../../services/aiService');
 
+/* ═════════════════════════════════════════════════════════════════
+   SUMMARY
+   ═════════════════════════════════════════════════════════════════ */
+
 const summary = asyncHandler(async (req, res) => {
-  const branchFilter = req.branchId ? { branchId: req.branchId } : {};
+  const tenantObjId = toObjectId(req.tenantId);
+  const branchObjId = req.branchId ? toObjectId(req.branchId) : null;
+  const branchFilter = branchObjId ? { branchId: branchObjId } : {};
 
   const start = new Date();
   start.setHours(0, 0, 0, 0);
 
   const salesFilter = {
-    tenantId: req.tenantId,
+    tenantId: tenantObjId,
     createdAt: { $gte: start },
     status: { $ne: 'voided' },
     ...branchFilter,
@@ -25,12 +32,21 @@ const summary = asyncHandler(async (req, res) => {
       { $match: salesFilter },
       { $group: { _id: null, total: { $sum: '$grandTotal' }, count: { $sum: 1 } } },
     ]),
-    Patient.countDocuments({ __allowGlobal: true, tenantId: req.tenantId, createdAt: { $gte: start } }),
+    Patient.countDocuments({
+      __allowGlobal: true,
+      tenantId: req.tenantId,
+      createdAt: { $gte: start },
+    }),
     (async () => {
-      const drugs = await Drug.find({ __allowGlobal: true, tenantId: req.tenantId, isActive: true, reorderLevel: { $gt: 0 } }).lean();
+      const drugs = await Drug.find({
+        __allowGlobal: true,
+        tenantId: req.tenantId,
+        isActive: true,
+        reorderLevel: { $gt: 0 },
+      }).lean();
       if (!drugs.length) return 0;
       const agg = await Batch.aggregate([
-        { $match: { tenantId: req.tenantId, ...branchFilter } },
+        { $match: { tenantId: tenantObjId, ...branchFilter } },
         { $group: { _id: '$drugId', qty: { $sum: '$qty' } } },
       ]);
       const qtyByDrug = Object.fromEntries(agg.map((r) => [String(r._id), r.qty]));
@@ -68,6 +84,10 @@ const summary = asyncHandler(async (req, res) => {
     recentSales,
   });
 });
+
+/* ═════════════════════════════════════════════════════════════════
+   INSIGHTS
+   ═════════════════════════════════════════════════════════════════ */
 
 const insights = asyncHandler(async (req, res) => {
   const insight = await aiService.generateWeeklyInsights({

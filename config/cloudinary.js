@@ -67,19 +67,39 @@ async function destroy(publicId, resourceType = 'image') {
   return cloudinary.uploader.destroy(publicId, { resource_type: resourceType });
 }
 
+/**
+ * Build signed upload params for client-side direct uploads.
+ *
+ * IMPORTANT: Cloudinary signs a specific set of params. The client must
+ * send EXACTLY those params back (plus file, api_key, signature).
+ * Sending extra params like `upload_preset` on a signed upload causes a
+ * 400 "Invalid Signature" because Cloudinary includes them in the
+ * verification string when present.
+ */
 function signedUploadParams({ folder, publicId, resourceType = 'image' } = {}) {
   const timestamp = Math.floor(Date.now() / 1000);
-  const paramsToSign = { timestamp, folder, public_id: publicId };
-  const signature = cloudinary.utils.api_sign_request(paramsToSign, env.cloudinary.apiSecret);
+
+  // Only these params are signed — sorted alphabetically by Cloudinary internally.
+  const paramsToSign = {
+    folder,
+    public_id: publicId,
+    timestamp,
+  };
+
+  const signature = cloudinary.utils.api_sign_request(
+    paramsToSign,
+    env.cloudinary.apiSecret
+  );
+
   return {
     timestamp,
     signature,
     folder,
     public_id: publicId,
-    resource_type: resourceType,
     cloud_name: env.cloudinary.cloudName,
     api_key: env.cloudinary.apiKey,
-    upload_preset: env.cloudinary.uploadPreset,
+    // No upload_preset on signed uploads
+    // No resource_type in the returned payload — client picks the URL segment
   };
 }
 

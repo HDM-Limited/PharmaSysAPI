@@ -3,6 +3,8 @@ const router = express.Router();
 const ctrl = require('../../controllers/public/authController');
 const authenticateTenant = require('../../middleware/client/authenticateTenant');
 
+/* ─────────────── Public ─────────────── */
+
 router.post('/register', ctrl.register);
 router.post('/login', ctrl.login);
 router.post('/refresh', ctrl.refresh);
@@ -12,6 +14,9 @@ router.post('/reset-password', ctrl.resetPassword);
 router.post('/accept-invite', ctrl.acceptInvite);
 router.post('/impersonate-exchange', ctrl.impersonateExchange);
 
+/* ─────────────── Authenticated ─────────────── */
+
 router.get('/me', authenticateTenant, ctrl.me);
+router.post('/change-password', authenticateTenant, ctrl.changePassword);
 
 module.exports = router;

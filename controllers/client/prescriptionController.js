@@ -9,12 +9,15 @@ const Prescription = require('../../models/client/Prescription');
 const Patient = require('../../models/client/Patient');
 const Branch = require('../../models/client/Branch');
 const Tenant = require('../../models/admin/Tenant');
+const Doctor = require('../../models/client/Doctor');          // ← registers 'Doctor'
 const { Batch, StockMovement } = require('../../models/client/Inventory');
 const notificationService = require('../../services/notificationService');
 const emailService = require('../../services/emailService');
 const smsService = require('../../services/smsService');
 
-/* ─────────────── LIST ─────────────── */
+/* ═════════════════════════════════════════════════════════════════
+   LIST
+   ═════════════════════════════════════════════════════════════════ */
 
 const list = asyncHandler(async (req, res) => {
   const { page, limit, skip } = parsePagination(req.query);
@@ -26,6 +29,7 @@ const list = asyncHandler(async (req, res) => {
   const [items, total] = await Promise.all([
     Prescription.find({ __allowGlobal: true, ...filter })
       .populate('patientId', 'name phone')
+      .populate('doctorId', 'name clinic')
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
@@ -36,7 +40,9 @@ const list = asyncHandler(async (req, res) => {
   return paginated(res, items, page, limit, total);
 });
 
-/* ─────────────── GET ─────────────── */
+/* ═════════════════════════════════════════════════════════════════
+   GET
+   ═════════════════════════════════════════════════════════════════ */
 
 const get = asyncHandler(async (req, res) => {
   assertObjectId(req.params.id, 'prescriptionId');
@@ -52,10 +58,19 @@ const get = asyncHandler(async (req, res) => {
   return ok(res, rx);
 });
 
-/* ─────────────── CREATE ─────────────── */
+/* ═════════════════════════════════════════════════════════════════
+   CREATE
+   ═════════════════════════════════════════════════════════════════ */
 
 const create = asyncHandler(async (req, res) => {
-  const { patientId, doctorId = null, refNo = null, items, notes = null } = req.body;
+  const {
+    patientId,
+    doctorId = null,
+    refNo = null,
+    items,
+    notes = null,
+  } = req.body;
+
   if (!patientId || !Array.isArray(items) || !items.length) {
     throw ApiError.badRequest('MISSING_FIELDS', 'patientId and items required');
   }
@@ -84,7 +99,9 @@ const create = asyncHandler(async (req, res) => {
   return created(res, rx.toObject());
 });
 
-/* ─────────────── UPDATE ─────────────── */
+/* ═════════════════════════════════════════════════════════════════
+   UPDATE
+   ═════════════════════════════════════════════════════════════════ */
 
 const update = asyncHandler(async (req, res) => {
   assertObjectId(req.params.id, 'prescriptionId');
@@ -102,7 +119,9 @@ const update = asyncHandler(async (req, res) => {
   return ok(res, rx);
 });
 
-/* ─────────────── DISPENSE ─────────────── */
+/* ═════════════════════════════════════════════════════════════════
+   DISPENSE
+   ═════════════════════════════════════════════════════════════════ */
 
 const dispense = asyncHandler(async (req, res) => {
   assertObjectId(req.params.id, 'prescriptionId');
@@ -112,7 +131,9 @@ const dispense = asyncHandler(async (req, res) => {
     tenantId: req.tenantId,
   });
   if (!rx) throw ApiError.notFound('PRESCRIPTION_NOT_FOUND', 'Prescription not found');
-  if (rx.status === 'dispensed') throw ApiError.badRequest('ALREADY_DISPENSED', 'Already dispensed');
+  if (rx.status === 'dispensed') {
+    throw ApiError.badRequest('ALREADY_DISPENSED', 'Already dispensed');
+  }
 
   const branchId = rx.branchId || req.branchId || req.branchIds[0];
 
@@ -132,7 +153,10 @@ const dispense = asyncHandler(async (req, res) => {
     for (const b of batches) {
       if (remaining <= 0) break;
       const take = Math.min(b.qty, remaining);
-      await Batch.updateOne({ __allowGlobal: true, _id: b._id }, { $inc: { qty: -take } });
+      await Batch.updateOne(
+        { __allowGlobal: true, _id: b._id },
+        { $inc: { qty: -take } }
+      );
       await StockMovement.create({
         tenantId: req.tenantId,
         branchId,
@@ -148,7 +172,10 @@ const dispense = asyncHandler(async (req, res) => {
     }
 
     if (remaining > 0) {
-      throw ApiError.badRequest('INSUFFICIENT_STOCK', `Not enough stock to dispense ${item.drugId}`);
+      throw ApiError.badRequest(
+        'INSUFFICIENT_STOCK',
+        `Not enough stock to dispense ${item.drugId}`
+      );
     }
   }
 
@@ -157,7 +184,10 @@ const dispense = asyncHandler(async (req, res) => {
   rx.dispensedAt = new Date();
   await rx.save();
 
-  const patient = await Patient.findOne({ __allowGlobal: true, _id: rx.patientId }).lean();
+  const patient = await Patient.findOne({
+    __allowGlobal: true,
+    _id: rx.patientId,
+  }).lean();
   const tenant = await Tenant.findById(req.tenantId).select('name').lean();
   const branch = await Branch.findById(branchId).select('name').lean();
 
@@ -207,7 +237,9 @@ const dispense = asyncHandler(async (req, res) => {
   return ok(res, rx.toObject());
 });
 
-/* ─────────────── CANCEL (soft state) ─────────────── */
+/* ═════════════════════════════════════════════════════════════════
+   CANCEL
+   ═════════════════════════════════════════════════════════════════ */
 
 const cancel = asyncHandler(async (req, res) => {
   assertObjectId(req.params.id, 'prescriptionId');
@@ -233,14 +265,19 @@ const cancel = asyncHandler(async (req, res) => {
   return ok(res, rx.toObject());
 });
 
-/* ─────────────── REMOVE (soft or hard) ─────────────── */
+/* ═════════════════════════════════════════════════════════════════
+   REMOVE (soft or hard)
+   ═════════════════════════════════════════════════════════════════ */
 
 const remove = asyncHandler(async (req, res) => {
   assertObjectId(req.params.id, 'prescriptionId');
   const hard = String(req.query.hard) === 'true';
 
   if (hard && req.user.role !== 'owner') {
-    throw ApiError.forbidden('ONLY_OWNER', 'Only the owner can permanently delete prescriptions');
+    throw ApiError.forbidden(
+      'ONLY_OWNER',
+      'Only the owner can permanently delete prescriptions'
+    );
   }
 
   const rx = await Prescription.findOne({

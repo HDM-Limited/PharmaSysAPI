@@ -20,11 +20,12 @@ const requestId = require('./middleware/global/requestId');
 const requestLogger = require('./middleware/global/requestLogger');
 const notFound = require('./middleware/global/notFound');
 const errorHandler = require('./middleware/global/errorHandler');
+const corsMw = require('./middleware/global/cors');
 
 const routes = require('./routes');
 const { startSchedulers, stopSchedulers } = require('./schedulers');
 
-/* ─────────────── crash throttle ─────────────── */
+/* ─────────── crash throttle ─────────── */
 
 const CRASH_WINDOW_MS = 60_000;
 const CRASH_LIMIT = 5;
@@ -37,7 +38,7 @@ function recordCrash() {
   return crashTimes.length;
 }
 
-/* ─────────────── main ─────────────── */
+/* ─────────── main ─────────── */
 
 async function bootstrap() {
   logger.info(`PharmaSys API v${pkg.version} starting — env=${env.nodeEnv} port=${env.port}`);
@@ -69,22 +70,9 @@ async function bootstrap() {
     crossOriginResourcePolicy: { policy: 'cross-origin' },
   }));
 
-  const corsOptions = {
-    origin: (origin, cb) => {
-      if (!origin) return cb(null, true);
-      if (env.corsOrigins.includes(origin)) return cb(null, true);
-      return cb(new Error(`CORS blocked: ${origin}`));
-    },
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id'],
-    exposedHeaders: ['X-Request-Id'],
-    maxAge: 86400,
-    optionsSuccessStatus: 204,
-  };
-
-  app.use(cors(corsOptions));
-  app.options(/.*/, cors(corsOptions));
+  /* ─── CORS — single source of truth in middleware/global/cors.js ─── */
+  app.use(corsMw);
+  app.options(/.*/, corsMw);
 
   /* ─── body parsers ─── */
   // Webhook-specific (must run BEFORE the global json parser)

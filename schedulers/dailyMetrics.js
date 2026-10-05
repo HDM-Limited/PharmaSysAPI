@@ -1,11 +1,12 @@
 const cron = require('node-cron');
 const Tenant = require('../models/admin/Tenant');
+const Plan = require('../models/admin/Plan');
 const User = require('../models/client/User');
 const Sale = require('../models/client/Sale');
-const Plan = require('../models/admin/Plan');
 const AppNotification = require('../models/client/AppNotification');
-const emailService = require('../services/emailService');
 const notificationService = require('../services/notificationService');
+const emailService = require('../services/emailService');
+const { runAsTenant } = require('../models/plugins/context');
 const { env } = require('../config/env');
 const { logger } = require('../utils/logger');
 
@@ -27,104 +28,127 @@ async function run() {
 
   let sent = 0;
   let skipped = 0;
+  let failed = 0;
 
   for (const tenant of tenants) {
-    // Dedupe: one daily summary per tenant per day
-    const already = await AppNotification.findOne({
-      __allowGlobal: true,
-      tenantId: tenant._id,
-      type: 'info',
-      title: 'Daily summary',
-      createdAt: { $gte: start },
-    })
-      .select('_id')
-      .lean();
-
-    if (already) {
-      skipped++;
-      continue;
-    }
-
-    const owners = await User.find({
-      __allowGlobal: true,
-      tenantId: tenant._id,
-      role: 'owner',
-      status: 'active',
-    })
-      .select('_id email fullName')
-      .lean();
-
-    if (!owners.length) continue;
-
-    const [salesAgg, topDrugs] = await Promise.all([
-      Sale.aggregate([
-        {
-          $match: {
-            tenantId: tenant._id,
-            createdAt: { $gte: start },
-            status: { $ne: 'voided' },
-          },
-        },
-        { $group: { _id: null, total: { $sum: '$grandTotal' }, count: { $sum: 1 } } },
-      ]),
-      Sale.aggregate([
-        {
-          $match: {
-            tenantId: tenant._id,
-            createdAt: { $gte: start },
-            status: { $ne: 'voided' },
-          },
-        },
-        { $unwind: '$items' },
-        { $group: { _id: '$items.name', qty: { $sum: '$items.qty' } } },
-        { $sort: { qty: -1 } },
-        { $limit: 5 },
-      ]),
-    ]);
-
-    const total = salesAgg[0]?.total || 0;
-    const count = salesAgg[0]?.count || 0;
-    const avgBasket = count ? total / count : 0;
-
-    const plan = await Plan.findOne({ code: tenant.planCode }).lean();
-    const currency = plan?.price?.currency || 'KES';
-    const top = topDrugs.map((t) => ({ name: t._id, qty: t.qty }));
-
-    for (const owner of owners) {
-      notificationService
-        .create({
+    try {
+      const result = await runAsTenant({ tenantId: String(tenant._id) }, async () => {
+        const already = await AppNotification.findOne({
           tenantId: tenant._id,
-          userId: owner._id,
           type: 'info',
           title: 'Daily summary',
-          body: `${currency} ${Math.round(total)} · ${count} sales`,
-          link: '/app/dashboard',
-          meta: { total, count, currency },
+          createdAt: { $gte: start },
         })
-        .catch(() => {});
+          .select('_id')
+          .lean();
 
-      if (owner.email) {
-        emailService
-          .sendDailySummary({
-            tenantId: tenant._id,
-            to: owner.email,
-            businessName: tenant.name,
-            date: start.toLocaleDateString('en-KE', { dateStyle: 'medium' }),
-            totalSales: total,
-            totalTransactions: count,
-            avgBasket,
-            currency,
-            topProducts: top,
-            insightsUrl: `${env.appUrl}/app/ai/insights`,
-          })
-          .catch(() => {});
-        sent++;
-      }
+        if (already) {
+          return { sent: 0, skipped: 1 };
+        }
+
+        const owners = await User.find({
+          tenantId: tenant._id,
+          role: 'owner',
+          status: 'active',
+        })
+          .select('_id email fullName')
+          .lean();
+
+        if (!owners.length) return { sent: 0, skipped: 0 };
+
+        const [salesAgg, topDrugs] = await Promise.all([
+          Sale.aggregate([
+            {
+              $match: {
+                tenantId: tenant._id,
+                createdAt: { $gte: start },
+                status: { $ne: 'voided' },
+              },
+            },
+            {
+              $group: {
+                _id: null,
+                total: { $sum: '$grandTotal' },
+                count: { $sum: 1 },
+              },
+            },
+          ]),
+          Sale.aggregate([
+            {
+              $match: {
+                tenantId: tenant._id,
+                createdAt: { $gte: start },
+                status: { $ne: 'voided' },
+              },
+            },
+            { $unwind: '$items' },
+            { $group: { _id: '$items.name', qty: { $sum: '$items.qty' } } },
+            { $sort: { qty: -1 } },
+            { $limit: 5 },
+          ]),
+        ]);
+
+        const total = salesAgg[0]?.total || 0;
+        const count = salesAgg[0]?.count || 0;
+        const avgBasket = count ? total / count : 0;
+
+        const plan = await Plan.findOne({ code: tenant.planCode }).lean();
+        const currency = plan?.price?.currency || 'KES';
+        const top = topDrugs.map((t) => ({ name: t._id, qty: t.qty }));
+
+        let innerSent = 0;
+
+        for (const owner of owners) {
+          notificationService
+            .create({
+              tenantId: tenant._id,
+              userId: owner._id,
+              type: 'info',
+              title: 'Daily summary',
+              body: `${currency} ${Math.round(total)} · ${count} sales`,
+              link: '/app/dashboard',
+              meta: { total, count, currency },
+            })
+            .catch(() => {});
+
+          if (owner.email) {
+            emailService
+              .sendDailySummary({
+                tenantId: tenant._id,
+                to: owner.email,
+                businessName: tenant.name,
+                date: start.toLocaleDateString('en-KE', { dateStyle: 'medium' }),
+                totalSales: total,
+                totalTransactions: count,
+                avgBasket,
+                currency,
+                topProducts: top,
+                insightsUrl: `${env.appUrl}/app/ai/insights`,
+              })
+              .catch(() => {});
+            innerSent++;
+          }
+        }
+
+        return { sent: innerSent, skipped: 0 };
+      });
+
+      sent += result.sent;
+      skipped += result.skipped;
+    } catch (err) {
+      failed++;
+      logger.warn(
+        { err: err.message, tenantId: String(tenant._id) },
+        'daily metrics failed for tenant'
+      );
     }
   }
 
-  logger.info({ sent, skipped }, 'daily metrics scan complete');
-  return { sent, skipped };
+  logger.info(
+    { sent, skipped, failed, tenants: tenants.length },
+    'daily metrics scan complete'
+  );
+  return { sent, skipped, failed };
 }
 
 function start() {

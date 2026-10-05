@@ -6,6 +6,7 @@ const User = require('../models/client/User');
 const AppNotification = require('../models/client/AppNotification');
 const notificationService = require('../services/notificationService');
 const emailService = require('../services/emailService');
+const { runAsTenant } = require('../models/plugins/context');
 const { logger } = require('../utils/logger');
 
 const TZ = process.env.SCHEDULERS_TIMEZONE || 'Africa/Nairobi';
@@ -24,110 +25,141 @@ async function run() {
 
   let notified = 0;
   let skipped = 0;
+  let failed = 0;
 
   for (const tenant of tenants) {
-    const branches = await Branch.find({
-      __allowGlobal: true,
-      tenantId: tenant._id,
-      isActive: true,
-    })
-      .select('_id name')
-      .lean();
+    try {
+      const result = await runAsTenant({ tenantId: String(tenant._id) }, async () => {
+        let innerNotified = 0;
+        let innerSkipped = 0;
 
-    for (const branch of branches) {
-      const drugs = await Drug.find({
-        __allowGlobal: true,
-        tenantId: tenant._id,
-        isActive: true,
-        reorderLevel: { $gt: 0 },
-      })
-        .select('_id name strength reorderLevel')
-        .lean();
-
-      if (!drugs.length) continue;
-
-      const agg = await Batch.aggregate([
-        { $match: { tenantId: tenant._id, branchId: branch._id } },
-        { $group: { _id: '$drugId', qty: { $sum: '$qty' } } },
-      ]);
-      const qtyByDrug = Object.fromEntries(agg.map((r) => [String(r._id), r.qty]));
-
-      for (const drug of drugs) {
-        const qty = qtyByDrug[String(drug._id)] || 0;
-        if (qty > drug.reorderLevel) continue;
-
-        // Dedupe: one alert per drug+branch per day
-        const already = await AppNotification.findOne({
-          __allowGlobal: true,
+        const branches = await Branch.find({
           tenantId: tenant._id,
-          branchId: branch._id,
-          type: 'inventory',
-          'meta.drugId': String(drug._id),
-          createdAt: { $gte: today },
+          isActive: true,
         })
-          .select('_id')
+          .select('_id name')
           .lean();
 
-        if (already) {
-          skipped++;
-          continue;
-        }
+        for (const branch of branches) {
+          const drugs = await Drug.find({
+            tenantId: tenant._id,
+            isActive: true,
+            reorderLevel: { $gt: 0 },
+          })
+            .select('_id name strength reorderLevel')
+            .lean();
 
-        const displayName = drug.strength ? `${drug.name} ${drug.strength}` : drug.name;
+          if (!drugs.length) continue;
 
-        const managers = await User.find({
-          __allowGlobal: true,
-          tenantId: tenant._id,
-          status: 'active',
-          $or: [
-            { role: 'owner' },
-            { role: 'branch_manager', branchIds: branch._id },
-          ],
-        })
-          .select('_id email phone fullName')
-          .lean();
+          const agg = await Batch.aggregate([
+            { $match: { tenantId: tenant._id, branchId: branch._id } },
+            { $group: { _id: '$drugId', qty: { $sum: '$qty' } } },
+          ]);
+          const qtyByDrug = Object.fromEntries(agg.map((r) => [String(r._id), r.qty]));
 
-        for (const m of managers) {
-          notificationService
-            .create({
+          for (const drug of drugs) {
+            const qty = qtyByDrug[String(drug._id)] || 0;
+            if (qty > drug.reorderLevel) continue;
+
+            const already = await AppNotification.findOne({
               tenantId: tenant._id,
-              userId: m._id,
               branchId: branch._id,
               type: 'inventory',
-              title:
-                qty === 0 ? `Out of stock: ${displayName}` : `Low stock: ${displayName}`,
-              body: `Only ${qty} left (reorder at ${drug.reorderLevel}).`,
-              link: `/app/inventory/${drug._id}`,
-              meta: {
-                drugId: String(drug._id),
-                qty,
-                reorderLevel: drug.reorderLevel,
-              },
+              'meta.drugId': String(drug._id),
+              createdAt: { $gte: today },
             })
-            .catch(() => {});
+              .select('_id')
+              .lean();
 
-          if (m.email) {
-            emailService
-              .sendLowStockAlert({
-                tenantId: tenant._id,
-                to: m.email,
-                businessName: tenant.name,
-                branchName: branch.name,
-                productName: displayName,
-                qty,
-                threshold: drug.reorderLevel,
-                productUrl: `/app/inventory/${drug._id}`,
-              })
-              .catch(() => {});
+            if (already) {
+              innerSkipped++;
+              continue;
+            }
+
+            const displayName = drug.strength
+              ? `${drug.name} ${drug.strength}`
+              : drug.name;
+
+            const managers = await User.find({
+              tenantId: tenant._id,
+              status: 'active',
+              $or: [
+                { role: 'owner' },
+                { role: 'branch_manager', branchIds: branch._id },
+              ],
+            })
+              .select('_id email phone fullName')
+              .lean();
+
+            for (const m of managers) {
+              notificationService
+                .create({
+                  tenantId: tenant._id,
+                  userId: m._id,
+                  branchId: branch._id,
+                  type: 'inventory',
+                  title:
+                    qty === 0
+                      ? `Out of stock: ${displayName}`
+                      : `Low stock: ${displayName}`,
+                  body: `Only ${qty} left (reorder at ${drug.reorderLevel}).`,
+                  link: `/app/inventory/${drug._id}`,
+                  meta: {
+                    drugId: String(drug._id),
+                    qty,
+                    reorderLevel: drug.reorderLevel,
+                  },
+                })
+                .catch(() => {});
+
+              if (m.email) {
+                emailService
+                  .sendLowStockAlert({
+                    tenantId: tenant._id,
+                    to: m.email,
+                    businessName: tenant.name,
+                    branchName: branch.name,
+                    productName: displayName,
+                    qty,
+                    threshold: drug.reorderLevel,
+                    productUrl: `/app/inventory/${drug._id}`,
+                  })
+                  .catch(() => {});
+              }
+            }
+            innerNotified++;
           }
         }
-        notified++;
-      }
+
+        return { notified: innerNotified, skipped: innerSkipped };
+      });
+
+      notified += result.notified;
+      skipped += result.skipped;
+    } catch (err) {
+      failed++;
+      logger.warn(
+        { err: err.message, tenantId: String(tenant._id) },
+        'low-stock scan failed for tenant'
+      );
     }
   }
 
-  logger.info({ notified, skipped }, 'low-stock scan complete');
-  return { notified, skipped };
+  // Only log at info level when something actually happened — keeps the console quiet
+  // during the every-15-minutes scans where dedupe skips everything.
+  if (notified > 0 || failed > 0) {
+    logger.info(
+      { notified, skipped, failed, tenants: tenants.length },
+      'low-stock scan complete'
+    );
+  } else {
+    logger.debug(
+      { notified, skipped, failed, tenants: tenants.length },
+      'low-stock scan complete'
+    );
+  }
+
+  return { notified, skipped, failed };
 }
 
 function start() {
