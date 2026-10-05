@@ -5,26 +5,46 @@ const Backup = require('../models/admin/Backup');
 const settingsService = require('./settingsService');
 const emailService = require('./emailService');
 const { uploadBuffer, destroy, FOLDERS, enabled: cloudinaryEnabled } = require('../config/cloudinary');
-const { env } = require('../config/env');
 const { logger } = require('../utils/logger');
 
-/* ═══════════════════════════════════════════════════════════
-   DUMP — pure Node, reads every collection via Mongoose
-   ═══════════════════════════════════════════════════════════ */
+const LOG_COLLECTIONS = new Set([
+  'adminactions',
+  'aicalls',
+  'aiactivities',
+  'notifications',
+  'backups',
+]);
 
-async function dumpDatabase({ collections = [] } = {}) {
+async function dumpDatabase({ collections = [], includeLogs = false } = {}) {
   const db = mongoose.connection.db;
   if (!db) throw new Error('DB_NOT_CONNECTED');
 
   const all = await db.listCollections().toArray();
-  const names = collections.length
-    ? all.filter((c) => collections.includes(c.name)).map((c) => c.name)
-    : all.map((c) => c.name);
+  const existing = new Set(all.map((c) => c.name));
+  const explicit = Array.isArray(collections) && collections.length > 0;
+
+  let names;
+  if (explicit) {
+    names = collections.filter((c) => existing.has(c));
+  } else {
+    names = all
+      .map((c) => c.name)
+      .filter((name) => includeLogs || !LOG_COLLECTIONS.has(name));
+  }
+
+  const excluded = explicit
+    ? []
+    : [...LOG_COLLECTIONS].filter((c) => existing.has(c));
 
   const dump = {
     version: 1,
     createdAt: new Date().toISOString(),
     database: db.databaseName,
+    meta: {
+      includeLogs,
+      explicitWhitelist: explicit,
+      excludedLogCollections: excluded,
+    },
     collections: {},
     counts: {},
   };
@@ -43,11 +63,7 @@ async function dumpDatabase({ collections = [] } = {}) {
 }
 
 function serialize(dump) {
-  return Buffer.from(JSON.stringify(dump));
-}
-
-function gzip(buffer) {
-  return zlib.gzipSync(buffer, { level: 6 });
+  return Buffer.from(JSON.stringify(dump, null, 2), 'utf8');
 }
 
 function sha256(buffer) {
@@ -66,10 +82,6 @@ function formatBytes(n) {
   return `${v.toFixed(1)} ${units[i]}`;
 }
 
-/* ═══════════════════════════════════════════════════════════
-   SETTINGS
-   ═══════════════════════════════════════════════════════════ */
-
 async function getSettings() {
   return settingsService.getBackupConfig();
 }
@@ -80,17 +92,13 @@ async function updateSettings(patch, adminId = null) {
   return settingsService.setMany(updates, adminId);
 }
 
-/* ═══════════════════════════════════════════════════════════
-   CREATE BACKUP
-   ═══════════════════════════════════════════════════════════ */
-
 async function createBackup({ type = 'auto', triggeredBy = null } = {}) {
   const cfg = await getSettings();
   if (!cfg.backup_enabled) throw new Error('BACKUPS_DISABLED');
   if (!cloudinaryEnabled) throw new Error('CLOUDINARY_NOT_CONFIGURED');
 
   const startedAt = new Date();
-  const filename = `pharmasys-backup-${startedAt.toISOString().replace(/[:.]/g, '-')}.json.gz`;
+  const filename = `pharmasys-backup-${startedAt.toISOString().replace(/[:.]/g, '-')}.json`;
 
   const backup = await Backup.create({
     filename,
@@ -104,12 +112,14 @@ async function createBackup({ type = 'auto', triggeredBy = null } = {}) {
   });
 
   try {
-    const dump = await dumpDatabase({ collections: cfg.backup_collections || [] });
-    const json = serialize(dump);
-    const gz = gzip(json);
-    const checksum = sha256(gz);
+    const dump = await dumpDatabase({
+      collections: cfg.backup_collections || [],
+      includeLogs: cfg.backup_include_logs === true,
+    });
+    const buf = serialize(dump);
+    const checksum = sha256(buf);
 
-    const uploaded = await uploadBuffer(gz, {
+    const uploaded = await uploadBuffer(buf, {
       folder: FOLDERS.backups(),
       publicId: filename,
       resourceType: 'raw',
@@ -119,7 +129,7 @@ async function createBackup({ type = 'auto', triggeredBy = null } = {}) {
 
     backup.publicId = uploaded.publicId;
     backup.url = uploaded.url;
-    backup.sizeBytes = gz.length;
+    backup.sizeBytes = buf.length;
     backup.checksum = checksum;
     backup.status = 'success';
     backup.completedAt = new Date();
@@ -135,7 +145,7 @@ async function createBackup({ type = 'auto', triggeredBy = null } = {}) {
           .sendAdminBackupSuccess({
             to: email,
             filename,
-            sizeHuman: formatBytes(gz.length),
+            sizeHuman: formatBytes(buf.length),
             durationMs,
             collections: Object.keys(dump.collections),
             at: backup.completedAt.toISOString(),
@@ -145,7 +155,16 @@ async function createBackup({ type = 'auto', triggeredBy = null } = {}) {
       }
     }
 
-    logger.info({ filename, bytes: gz.length, durationMs, collections: backup.collections.length }, 'backup completed');
+    logger.info(
+      {
+        filename,
+        bytes: buf.length,
+        durationMs,
+        collections: backup.collections.length,
+        excluded: dump.meta.excludedLogCollections.length,
+      },
+      'backup completed'
+    );
     return backup;
   } catch (err) {
     backup.status = 'failed';
@@ -158,7 +177,11 @@ async function createBackup({ type = 'auto', triggeredBy = null } = {}) {
       const recipients = cfg.backup_notify_emails || [];
       for (const email of recipients) {
         emailService
-          .sendAdminBackupFailed({ to: email, error: err.message, at: backup.completedAt.toISOString() })
+          .sendAdminBackupFailed({
+            to: email,
+            error: err.message,
+            at: backup.completedAt.toISOString(),
+          })
           .catch(() => {});
       }
     }
@@ -167,10 +190,6 @@ async function createBackup({ type = 'auto', triggeredBy = null } = {}) {
     throw err;
   }
 }
-
-/* ═══════════════════════════════════════════════════════════
-   RESTORE — pure Node, reads JSON.gz from Cloudinary
-   ═══════════════════════════════════════════════════════════ */
 
 async function downloadBuffer(url) {
   const https = require('https');
@@ -190,6 +209,15 @@ async function downloadBuffer(url) {
   });
 }
 
+function decodeBackupBuffer(buf, filename = '') {
+  const isGzip =
+    (buf.length >= 2 && buf[0] === 0x1f && buf[1] === 0x8b) ||
+    filename.endsWith('.gz');
+
+  const json = isGzip ? zlib.gunzipSync(buf) : buf;
+  return JSON.parse(json.toString('utf8'));
+}
+
 async function restoreBackup(id, { confirm = false } = {}) {
   if (!confirm) throw new Error('RESTORE_NOT_CONFIRMED');
 
@@ -197,9 +225,8 @@ async function restoreBackup(id, { confirm = false } = {}) {
   if (!doc) throw new Error('BACKUP_NOT_FOUND');
   if (!doc.url) throw new Error('BACKUP_HAS_NO_URL');
 
-  const gz = await downloadBuffer(doc.url);
-  const json = zlib.gunzipSync(gz);
-  const dump = JSON.parse(json.toString('utf8'));
+  const buf = await downloadBuffer(doc.url);
+  const dump = decodeBackupBuffer(buf, doc.filename);
 
   if (!dump.collections) throw new Error('INVALID_BACKUP_FORMAT');
 
@@ -225,10 +252,6 @@ async function restoreBackup(id, { confirm = false } = {}) {
     at: new Date().toISOString(),
   };
 }
-
-/* ═══════════════════════════════════════════════════════════
-   LIST / GET / DELETE / PRUNE / EMAIL
-   ═══════════════════════════════════════════════════════════ */
 
 async function listBackups({ page = 1, limit = 20, status = null } = {}) {
   const filter = {};
@@ -303,8 +326,6 @@ async function prune() {
   }
   return { deleted };
 }
-
-/* ═══════════════════════════════════════════════════════════ */
 
 module.exports = {
   getSettings,
